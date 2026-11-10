@@ -1,0 +1,4 @@
+{"ts": "2026-11-09T19:16:47.267", "t_ms": 0, "seq": 1, "task_id": "20261109-191647-bbc4", "event": "task_start", "goal": "你好", "mode": "web", "autonomous": false, "workspace": "F:\\agentBuild\\freeAgent"}
+{"ts": "2026-11-09T19:16:47.273", "t_ms": 5, "seq": 2, "task_id": "20261109-191647-bbc4", "event": "thinking", "turn": 1, "model": "unknown"}
+{"ts": "2026-11-09T19:17:23.992", "t_ms": 36725, "seq": 3, "task_id": "20261109-191647-bbc4", "event": "usage", "turn": 1, "chars": 3024, "est_tokens": 1890, "model": "zhipu-web"}
+{"ts": "2026-11-09T19:17:23.999", "t_ms": 36731, "seq": 4, "task_id": "20261109-191647-bbc4", "event": "task_end", "ok": true, "stop_reason": "finished", "answer": "ChatGLM\n请求过于频繁，请稍后再试\n本次回答已被终止\n重新回答", "steps": 0}

@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>freeAgent 控制台</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="brand">
+    <span class="logo">◈</span>
+    <div>
+      <b>freeAgent</b>
+      <small>Agent Console</small>
+    </div>
+  </div>
+
+  <nav class="nav" id="nav">
+    <button class="nav-item active" data-view="run"><span class="ico">▶</span><span class="label">新任务</span></button>
+    <button class="nav-item" data-view="live"><span class="ico">◍</span><span class="label">进行中</span><span class="badge hidden" id="badgeRunning">0</span></button>
+    <button class="nav-item" data-view="pending"><span class="ico">⚠</span><span class="label">待确认</span><span class="badge danger hidden" id="badgeConfirm">0</span></button>
+    <button class="nav-item" data-view="history"><span class="ico">☰</span><span class="label">审计日志</span></button>
+    <button class="nav-item" data-view="skills"><span class="ico">✦</span><span class="label">技能库</span></button>
+    <button class="nav-item" data-view="settings"><span class="ico">⚙</span><span class="label">设置</span></button>
+  </nav>
+
+  <div class="side-foot">
+    <div class="mono small muted" id="wsPath" title="">工作区：—</div>
+    <button class="link" id="themeBtn">切换明暗主题</button>
+    <button class="link" id="demoHint">演示模式下不联网</button>
+  </div>
+</aside>
+
+<main class="main">
+  <header class="topbar">
+    <div class="goal-wrap">
+      <textarea id="goal" rows="1" spellcheck="false"
+        placeholder="告诉 Agent 要做什么，例如：统计工作区每个 .py 文件的行数并写入 stats.md（Ctrl+Enter 运行）"></textarea>
+    </div>
+    <button class="btn primary" id="runBtn">运行</button>
+    <button class="btn ghost" id="pauseBtn" disabled>暂停</button>
+    <button class="btn danger" id="stopBtn" disabled>停止</button>
+    <button class="btn ghost icon" id="optBtn" title="运行选项">⚙</button>
+  </header>
+
+  <div class="opt-panel hidden" id="optPanel">
+    <label><input type="checkbox" id="optAutonomous"> 自主模式（拆步骤 + 验收）</label>
+    <label><input type="checkbox" id="optSnapshot"> 任务前打快照</label>
+    <label><input type="checkbox" id="optPauseFail"> 失败时暂停（重试 / 跳过 / 改参数）</label>
+    <label><input type="checkbox" id="optConfirmWrites"> 写文件也要确认</label>
+    <label><input type="checkbox" id="optReadonly"> 只读模式</label>
+    <label><input type="checkbox" id="optAutoYes"> 自动批准高危操作（不建议）</label>
+    <label>最大步数 <input type="number" id="optMaxSteps" min="1" max="60" value="15"></label>
+  </div>
+
+  <div class="banner-area" id="bannerArea"></div>
+
+  <!-- 运行视图 -->
+  <section class="view" id="view-run">
+    <div class="flow-head">
+      <span class="chip" id="taskChip">—</span>
+      <span class="goal-text" id="goalText">还没有任务</span>
+      <span id="liveHint" class="muted small"></span>
+    </div>
+    <div class="replay-bar hidden" id="replayBar">
+      <span>回放</span>
+      <button class="btn small ghost" id="replayPlay">暂停</button>
+      <button class="btn small ghost" id="replaySpeed">2×</button>
+      <div class="track"><i id="replayProgress"></i></div>
+      <span id="replayLabel" class="mono">0%</span>
+      <button class="btn small ghost" id="replayExit">退出回放</button>
+    </div>
+    <div class="flow" id="flow">
+      <div class="empty" id="emptyState">
+        <span class="big">◈</span>
+        左侧输入目标，点「运行」开始。<br>
+        每一步都会变成一张卡片：<code>工具名 + 关键参数</code>，点开看完整输入输出。<br>
+        高危操作会弹窗等你确认；失败可以 <code>重试 / 跳过 / 改参数</code>。
+      </div>
+    </div>
+    <div class="statusbar">
+      <span><i class="status-dot" id="connDot"></i><span id="stStatus">空闲</span></span>
+      <span class="sep">|</span>
+      <span>模型 <span class="v" id="stModel">—</span></span>
+      <span class="sep">|</span>
+      <span>步数 <span class="v" id="stSteps">0 / 15</span></span>
+      <span class="sep">|</span>
+      <span>耗时 <span class="v" id="stElapsed">0.0s</span></span>
+      <span class="sep">|</span>
+      <span>最近错误 <span class="v" id="stError">—</span></span>
+    </div>
+  </section>
+
+  <!-- 审计日志 -->
+  <section class="view" id="view-history" hidden>
+    <div class="page">
+      <h2>审计日志</h2>
+      <div class="sub">每个任务一份 JSONL 轨迹，点任意一行进入 2 倍速回放。轨迹在 <span class="mono">.agent/traces/</span>。</div>
+      <table class="table">
+        <thead><tr><th>任务</th><th>目标</th><th>结果</th><th>工具调用</th><th>时间</th></tr></thead>
+        <tbody id="traceBody"><tr><td colspan="5" class="muted">加载中…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 技能库 -->
+  <section class="view" id="view-skills" hidden>
+    <div class="page">
+      <h2>技能库</h2>
+      <div class="sub">成功轨迹可以固化成技能（工具序列 + 参数），下次直接以 <span class="mono">skill_*</span> 调用。</div>
+      <div class="grid" id="skillGrid"></div>
+    </div>
+  </section>
+
+  <!-- 设置 -->
+  <section class="view" id="view-settings" hidden>
+    <div class="page">
+      <h2>设置</h2>
+      <div class="sub">这些值来自启动参数与环境变量；改完重启服务生效。</div>
+      <div id="settingsBody"></div>
+    </div>
+  </section>
+</main>
+
+<aside class="panel">
+  <div class="panel-sec">
+    <h3>本次任务</h3>
+    <div class="kv">
+      <div class="row"><span class="k">状态</span><span class="v" id="pStatus">—</span></div>
+      <div class="row"><span class="k">步数 / 上限</span><span class="v" id="pSteps">0 / 15</span></div>
+      <div class="row"><span class="k">模型</span><span class="v" id="pModel">—</span></div>
+      <div class="row"><span class="k">耗时</span><span class="v" id="pElapsed">0.0s</span></div>
+      <div class="row"><span class="k">token 估算</span><span class="v" id="pTokens">—</span></div>
+      <div class="row"><span class="k">产物</span><span class="v" id="pArtifacts">—</span></div>
+    </div>
+    <div class="meter"><i id="stepMeter"></i></div>
+  </div>
+
+  <div class="panel-sec">
+    <h3>模型路由 <span class="right muted small" id="modeLabel">—</span></h3>
+    <div id="modelList" class="kv"></div>
+  </div>
+
+  <div class="panel-sec">
+    <h3>沙箱文件 <span class="right"><button class="link" id="refreshTree">刷新</button></span></h3>
+    <div class="tree" id="fileTree"><div class="muted small">加载中…</div></div>
+  </div>
+
+  <div class="panel-sec">
+    <h3>快照 <span class="right"><button class="link" id="snapNow">立即快照</button></span></h3>
+    <div class="kv" id="snapList"><div class="muted small">暂无快照</div></div>
+  </div>
+
+  <div class="panel-sec">
+    <h3>信任规则</h3>
+    <div id="trustList" class="kv"><div class="muted small">确认 3 次后同类操作自动放行</div></div>
+  </div>
+</aside>
+
+<div id="modalRoot"></div>
+<div class="toast-root" id="toastRoot"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

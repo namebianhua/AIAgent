@@ -1,0 +1,2 @@
+{"ts": "2026-11-09T18:00:35.899", "t_ms": 0, "seq": 1, "task_id": "20261109-180035-79fc", "event": "task_start", "goal": "你好", "mode": "web", "autonomous": false, "workspace": "F:\\agentBuild\\freeAgent"}
+{"ts": "2026-11-09T18:00:35.905", "t_ms": 5, "seq": 2, "task_id": "20261109-180035-79fc", "event": "thinking", "turn": 1, "model": "unknown"}

@@ -1,0 +1,9 @@
+# 演示用配置文件
+service:
+  name: freeAgent
+  mode: web
+  max_steps: 15
+features:
+  tools: true
+  memory: true
+  critic: true

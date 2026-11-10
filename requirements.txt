@@ -1,0 +1,26 @@
+# 需要 CPython（MSYS/MINGW 版 Python 装不了 playwright）
+# 安装：pip install -r requirements.txt
+# 浏览器：playwright install chromium（本机已预装 chromium-1208，故锁定 1.58.0 复用，
+#         国内 CDN 直连常被墙，如需升级可设置 PLAYWRIGHT_DOWNLOAD_HOST 镜像）
+requests>=2.31
+playwright==1.58.0
+
+# T2 小红书：不需要额外依赖。
+# 复用 playwright 的浏览器内核；首次使用需人工扫码登录一次：
+#   python main.py --xhs-login
+
+# T3 自主任务：不需要额外依赖。
+# 长期记忆用标准库 sqlite3，HTTP 服务用标准库 http.server + SSE，
+# 定时任务用标准库 threading + json。刻意不引入 FastAPI / Chroma / FAISS，
+# 避免国内网络环境装不上依赖导致整套功能不可用。
+
+# 交互层（控制台）：仍然零新增依赖。
+# 后端 http.server + SSE，前端一个 index.html + app.js + app.css（无 Node、无构建）。
+# 启动：python main.py --serve --demo        # 演示模式，不联网不启浏览器
+#       python main.py --serve -m web        # 真实模型，浏览器打开 http://127.0.0.1:8787/
+
+# 本地模型通道（本轮新增）：不新增依赖。
+# 走 Ollama 原生 /api/chat + /api/tags，HTTP 客户端复用上面的 requests。
+# 启用：python main.py --serve -m hybrid --local-model qwen2.5:7b-instruct
+#      （或环境变量 OLLAMA_MODEL / OLLAMA_URL）
+# 未安装 Ollama 时不影响使用：本地探活失败会自动走 API/网页通道。

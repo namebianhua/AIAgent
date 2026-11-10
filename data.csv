@@ -1,0 +1,4 @@
+name,steps,ok
+read_file,3,true
+write_file,2,true
+run_shell,1,false

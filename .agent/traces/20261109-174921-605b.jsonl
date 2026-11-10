@@ -1,0 +1,2 @@
+{"ts": "2026-11-09T17:49:21.897", "t_ms": 0, "seq": 1, "task_id": "20261109-174921-605b", "event": "task_start", "goal": "搜索足球，总结点赞最高的一篇", "mode": "web", "autonomous": false, "workspace": "F:\\agentBuild\\freeAgent"}
+{"ts": "2026-11-09T17:49:21.901", "t_ms": 4, "seq": 2, "task_id": "20261109-174921-605b", "event": "thinking", "turn": 1, "model": "unknown"}

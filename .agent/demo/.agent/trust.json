@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "rules": {
+    "write_file(append,content,path)": {
+      "count": 3,
+      "trusted": true,
+      "updated": "2026-11-09 17:05:50"
+    },
+    "run_shell(cmd,timeout)": {
+      "count": 3,
+      "trusted": true,
+      "updated": "2026-11-09 17:04:52"
+    }
+  }
+}

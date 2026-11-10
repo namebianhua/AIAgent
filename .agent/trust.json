@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "rules": {
+    "run_shell(cmd,timeout)": {
+      "count": 3,
+      "trusted": true,
+      "updated": "2026-11-10 11:49:40"
+    },
+    "ui_open_app(target)": {
+      "count": 1,
+      "trusted": false,
+      "updated": "2026-11-10 12:03:12"
+    }
+  }
+}

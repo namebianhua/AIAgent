@@ -1,0 +1,133 @@
+2026-11-09 07:27:07.101: [INFO] CurrentProfilePath: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-09 07:27:07.101: [INFO] Profiles total count: 1
+2026-11-09 07:27:07.101: [INFO] Profile: name=用户配置 1 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=null
+2026-11-09 07:27:07.101: [INFO] LastUsedProfileDir: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-09 07:27:07.101: [INFO] VisibilityChanged: 0
+2026-11-09 07:27:07.153: [INFO] BookmarkNodeAdded, ABU: 0
+2026-11-09 07:27:07.154: [INFO] BookmarkNodeAdded, ABU: 0
+2026-11-09 07:27:07.154: [INFO] OnDoneLoading sync enabled: 0
+2026-11-09 07:27:07.154: [INFO] BookmarkModelLoaded, ids_reassigned: 0
+2026-11-09 07:27:07.154: [INFO] BookmarksLoadDropped droppedNodes=0
+2026-11-09 07:27:07.154: [INFO] BookmarksSnapshot Startup total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-09 07:31:16.293: [INFO] BookmarksSnapshot Shutdown total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-09 07:50:37.001: [INFO] CurrentProfilePath: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-09 07:50:37.001: [INFO] Profiles total count: 1
+2026-11-09 07:50:37.001: [INFO] Profile: name=个人 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=2026-11-09T07:27:16.235Z
+2026-11-09 07:50:37.001: [INFO] LastUsedProfileDir: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-09 07:50:37.001: [INFO] MostRecentlyActiveProfile: name=个人 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=2026-11-09T07:27:16.235Z
+2026-11-09 07:50:37.001: [INFO] VisibilityChanged: 0
+2026-11-09 07:50:37.050: [INFO] OnDoneLoading sync enabled: 0
+2026-11-09 07:50:37.050: [INFO] BookmarkModelLoaded, ids_reassigned: 0
+2026-11-09 07:50:37.050: [INFO] BookmarksLoadDropped droppedNodes=0
+2026-11-09 07:50:37.050: [INFO] BookmarksSnapshot Startup total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-09 07:51:31.668: [INFO] BookmarksSnapshot Shutdown total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-09 07:51:37.936: [INFO] CurrentProfilePath: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-09 07:51:37.936: [INFO] Profiles total count: 1
+2026-11-09 07:51:37.936: [INFO] Profile: name=个人 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=2026-11-09T07:50:39.285Z
+2026-11-09 07:51:37.936: [INFO] LastUsedProfileDir: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-09 07:51:37.936: [INFO] MostRecentlyActiveProfile: name=个人 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=2026-11-09T07:50:39.285Z
+2026-11-09 07:51:37.936: [INFO] VisibilityChanged: 0
+2026-11-09 07:51:37.953: [INFO] OnDoneLoading sync enabled: 0
+2026-11-09 07:51:37.953: [INFO] BookmarkModelLoaded, ids_reassigned: 0
+2026-11-09 07:51:37.953: [INFO] BookmarksLoadDropped droppedNodes=0
+2026-11-09 07:51:37.953: [INFO] BookmarksSnapshot Startup total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-09 07:51:54.788: [INFO] BookmarksSnapshot Shutdown total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-09 07:51:59.765: [INFO] CurrentProfilePath: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-09 07:51:59.765: [INFO] Profiles total count: 1
+2026-11-09 07:51:59.765: [INFO] Profile: name=个人 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=2026-11-09T07:51:37.944Z
+2026-11-09 07:51:59.765: [INFO] LastUsedProfileDir: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-09 07:51:59.765: [INFO] MostRecentlyActiveProfile: name=个人 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=2026-11-09T07:51:37.944Z
+2026-11-09 07:51:59.765: [INFO] VisibilityChanged: 0
+2026-11-09 07:51:59.785: [INFO] OnDoneLoading sync enabled: 0
+2026-11-09 07:51:59.785: [INFO] BookmarkModelLoaded, ids_reassigned: 0
+2026-11-09 07:51:59.785: [INFO] BookmarksLoadDropped droppedNodes=0
+2026-11-09 07:51:59.785: [INFO] BookmarksSnapshot Startup total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-09 07:52:16.320: [INFO] BookmarksSnapshot Shutdown total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-09 07:52:28.214: [INFO] CurrentProfilePath: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-09 07:52:28.214: [INFO] Profiles total count: 1
+2026-11-09 07:52:28.214: [INFO] Profile: name=个人 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=2026-11-09T07:51:59.775Z
+2026-11-09 07:52:28.214: [INFO] LastUsedProfileDir: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-09 07:52:28.214: [INFO] MostRecentlyActiveProfile: name=个人 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=2026-11-09T07:51:59.775Z
+2026-11-09 07:52:28.214: [INFO] VisibilityChanged: 0
+2026-11-09 07:52:28.234: [INFO] OnDoneLoading sync enabled: 0
+2026-11-09 07:52:28.234: [INFO] BookmarkModelLoaded, ids_reassigned: 0
+2026-11-09 07:52:28.234: [INFO] BookmarksLoadDropped droppedNodes=0
+2026-11-09 07:52:28.234: [INFO] BookmarksSnapshot Startup total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-09 07:52:35.116: [INFO] BookmarksSnapshot Shutdown total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-09 07:55:06.622: [INFO] CurrentProfilePath: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-09 07:55:06.622: [INFO] Profiles total count: 1
+2026-11-09 07:55:06.622: [INFO] Profile: name=个人 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=2026-11-09T07:54:43.736Z
+2026-11-09 07:55:06.622: [INFO] LastUsedProfileDir: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-09 07:55:06.622: [INFO] MostRecentlyActiveProfile: name=个人 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=2026-11-09T07:54:43.736Z
+2026-11-09 07:55:06.622: [INFO] VisibilityChanged: 0
+2026-11-09 07:55:06.672: [INFO] OnDoneLoading sync enabled: 0
+2026-11-09 07:55:06.672: [INFO] BookmarkModelLoaded, ids_reassigned: 0
+2026-11-09 07:55:06.672: [INFO] BookmarksLoadDropped droppedNodes=0
+2026-11-09 07:55:06.672: [INFO] BookmarksSnapshot Startup total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-09 07:56:21.422: [INFO] BookmarksSnapshot Shutdown total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-09 07:56:45.900: [INFO] CurrentProfilePath: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-09 07:56:45.900: [INFO] Profiles total count: 1
+2026-11-09 07:56:45.900: [INFO] Profile: name=个人 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=2026-11-09T07:56:31.652Z
+2026-11-09 07:56:45.900: [INFO] LastUsedProfileDir: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-09 07:56:45.900: [INFO] MostRecentlyActiveProfile: name=个人 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=2026-11-09T07:56:31.652Z
+2026-11-09 07:56:45.900: [INFO] VisibilityChanged: 0
+2026-11-09 07:56:45.918: [INFO] OnDoneLoading sync enabled: 0
+2026-11-09 07:56:45.918: [INFO] BookmarkModelLoaded, ids_reassigned: 0
+2026-11-09 07:56:45.918: [INFO] BookmarksLoadDropped droppedNodes=0
+2026-11-09 07:56:45.918: [INFO] BookmarksSnapshot Startup total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-09 07:56:59.616: [INFO] BookmarksSnapshot Shutdown total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-09 07:57:08.049: [INFO] CurrentProfilePath: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-09 07:57:08.049: [INFO] Profiles total count: 1
+2026-11-09 07:57:08.049: [INFO] Profile: name=个人 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=2026-11-09T07:56:45.910Z
+2026-11-09 07:57:08.049: [INFO] LastUsedProfileDir: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-09 07:57:08.049: [INFO] MostRecentlyActiveProfile: name=个人 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=2026-11-09T07:56:45.910Z
+2026-11-09 07:57:08.049: [INFO] VisibilityChanged: 0
+2026-11-09 07:57:08.068: [INFO] OnDoneLoading sync enabled: 0
+2026-11-09 07:57:08.068: [INFO] BookmarkModelLoaded, ids_reassigned: 0
+2026-11-09 07:57:08.068: [INFO] BookmarksLoadDropped droppedNodes=0
+2026-11-09 07:57:08.068: [INFO] BookmarksSnapshot Startup total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-09 07:57:23.768: [INFO] BookmarksSnapshot Shutdown total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-09 07:57:54.732: [INFO] CurrentProfilePath: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-09 07:57:54.732: [INFO] Profiles total count: 1
+2026-11-09 07:57:54.732: [INFO] Profile: name=个人 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=2026-11-09T07:57:08.058Z
+2026-11-09 07:57:54.732: [INFO] LastUsedProfileDir: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-09 07:57:54.732: [INFO] MostRecentlyActiveProfile: name=个人 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=2026-11-09T07:57:08.058Z
+2026-11-09 07:57:54.732: [INFO] VisibilityChanged: 0
+2026-11-09 07:57:54.753: [INFO] OnDoneLoading sync enabled: 0
+2026-11-09 07:57:54.753: [INFO] BookmarkModelLoaded, ids_reassigned: 0
+2026-11-09 07:57:54.753: [INFO] BookmarksLoadDropped droppedNodes=0
+2026-11-09 07:57:54.753: [INFO] BookmarksSnapshot Startup total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-09 07:58:17.828: [INFO] BookmarksSnapshot Shutdown total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-09 08:00:45.907: [INFO] CurrentProfilePath: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-09 08:00:45.907: [INFO] Profiles total count: 1
+2026-11-09 08:00:45.907: [INFO] Profile: name=个人 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=2026-11-09T07:59:45.956Z
+2026-11-09 08:00:45.907: [INFO] LastUsedProfileDir: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-09 08:00:45.907: [INFO] MostRecentlyActiveProfile: name=个人 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=2026-11-09T07:59:45.956Z
+2026-11-09 08:00:45.907: [INFO] VisibilityChanged: 0
+2026-11-09 08:00:45.958: [INFO] OnDoneLoading sync enabled: 0
+2026-11-09 08:00:45.958: [INFO] BookmarkModelLoaded, ids_reassigned: 0
+2026-11-09 08:00:45.958: [INFO] BookmarksLoadDropped droppedNodes=0
+2026-11-09 08:00:45.958: [INFO] BookmarksSnapshot Startup total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-09 08:01:32.825: [INFO] BookmarksSnapshot Shutdown total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-09 08:01:57.555: [INFO] CurrentProfilePath: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-09 08:01:57.555: [INFO] Profiles total count: 1
+2026-11-09 08:01:57.555: [INFO] Profile: name=个人 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=2026-11-09T08:01:28.090Z
+2026-11-09 08:01:57.555: [INFO] LastUsedProfileDir: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-09 08:01:57.555: [INFO] MostRecentlyActiveProfile: name=个人 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=2026-11-09T08:01:28.090Z
+2026-11-09 08:01:57.555: [INFO] VisibilityChanged: 0
+2026-11-09 08:01:57.608: [INFO] OnDoneLoading sync enabled: 0
+2026-11-09 08:01:57.608: [INFO] BookmarkModelLoaded, ids_reassigned: 0
+2026-11-09 08:01:57.608: [INFO] BookmarksLoadDropped droppedNodes=0
+2026-11-09 08:01:57.608: [INFO] BookmarksSnapshot Startup total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-09 08:03:12.573: [INFO] BookmarksSnapshot Shutdown total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-10 03:23:19.518: [INFO] CurrentProfilePath: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-10 03:23:19.518: [INFO] Profiles total count: 1
+2026-11-10 03:23:19.518: [INFO] Profile: name=个人 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=2026-11-09T09:48:51.156Z
+2026-11-10 03:23:19.518: [INFO] LastUsedProfileDir: F:\agentBuild\freeAgent\.agent\browser\xhs\Default
+2026-11-10 03:23:19.518: [INFO] MostRecentlyActiveProfile: name=个人 path=F:\agentBuild\freeAgent\.agent\browser\xhs\Default lastActive=2026-11-09T09:48:51.156Z
+2026-11-10 03:23:19.518: [INFO] VisibilityChanged: 0
+2026-11-10 03:23:19.582: [INFO] OnDoneLoading sync enabled: 0
+2026-11-10 03:23:19.582: [INFO] BookmarkModelLoaded, ids_reassigned: 0
+2026-11-10 03:23:19.582: [INFO] BookmarksLoadDropped droppedNodes=0
+2026-11-10 03:23:19.582: [INFO] BookmarksSnapshot Startup total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-11-10 03:24:40.359: [INFO] BookmarksSnapshot Shutdown total=2 bar=2 other=0 mobile=0 showBar=0 showBarNTP=1

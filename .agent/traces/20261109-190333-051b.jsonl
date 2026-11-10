@@ -1,0 +1,5 @@
+{"ts": "2026-11-09T19:03:33.607", "t_ms": 0, "seq": 1, "task_id": "20261109-190333-051b", "event": "task_start", "goal": "你现在只能操作工作区吗？", "mode": "hybrid", "autonomous": false, "workspace": "F:\\agentBuild\\freeAgent"}
+{"ts": "2026-11-09T19:03:33.658", "t_ms": 51, "seq": 2, "task_id": "20261109-190333-051b", "event": "log", "level": "info", "message": "本地模型就绪：qwen2.5:7b-instruct（本地优先，失败自动降级）"}
+{"ts": "2026-11-09T19:03:33.661", "t_ms": 53, "seq": 3, "task_id": "20261109-190333-051b", "event": "thinking", "turn": 1, "model": "unknown"}
+{"ts": "2026-11-09T19:03:36.936", "t_ms": 3329, "seq": 4, "task_id": "20261109-190333-051b", "event": "usage", "turn": 1, "chars": 3034, "est_tokens": 1896, "model": "ollama-local:qwen2.5:7b-instruct"}
+{"ts": "2026-11-09T19:03:36.940", "t_ms": 3332, "seq": 5, "task_id": "20261109-190333-051b", "event": "task_end", "ok": true, "stop_reason": "finished", "answer": "是的，我现在只能操作工作区内的文件和目录。工作区外的操作我无法进行。", "steps": 0}
