@@ -32,6 +32,10 @@ class AutoConfig:
     use_critic: bool = True
     recall_k: int = 3
     save_skill: Optional[str] = None
+    # 第四阶段：语义经验库召回
+    exp_k: int = 2
+    # None = 沿用经验库标定出的门槛；写死数字会在换 embedding 模型后失效
+    exp_min_score: Optional[float] = None
 
 
 class AutonomousAgent:
@@ -92,8 +96,42 @@ class AutonomousAgent:
             experience = "\n".join(r.to_card(i) for i, r in enumerate(records, 1))
             self._emit("recall", hits=recalled)
 
+        # 语义经验库（第四阶段）：和上面的关键词召回互补，命中「说法不同但意思相近」的历史任务
+        exp_cards: List[str] = []
+        exp_store = getattr(self.agent, "experience", None)
+        if exp_store is not None:
+            try:
+                hits = exp_store.recall(goal, k=cfg.exp_k, min_score=cfg.exp_min_score)
+            except Exception:
+                hits = []
+            if hits:
+                exp_cards = [h.to_card(i) for i, h in enumerate(hits, 1)]
+                self._emit(
+                    "exp_recall",
+                    hits=[
+                        {"goal": h.goal, "score": round(h.score, 3), "ok": h.ok,
+                         "task_id": h.task_id}
+                        for h in hits
+                    ],
+                )
+                experience = "\n\n".join(
+                    [experience] + exp_cards if experience else exp_cards
+                )
+
+        # 知识库注入（第二阶段）：整个任务只检索一次，各计划步骤共用，避免重复 embedding
+        rag_context = ""
+        try:
+            build_rag_ctx = getattr(self.agent, "_build_rag_context", None)
+            if callable(build_rag_ctx):
+                rag_context = build_rag_ctx(goal) or ""
+        except Exception:
+            rag_context = ""
+        if rag_context:
+            self._emit("rag_inject", knowledge_chars=len(rag_context))
+
         tools_brief = self.agent.registry.to_brief()
         plan = self.planner.make_plan(goal, tools_brief, experience)
+
         self._emit("plan", steps=plan.steps, criteria=plan.criteria, revision=0, parsed=plan.parsed)
 
         remaining: List[str] = list(plan.steps)
@@ -133,6 +171,7 @@ class AutonomousAgent:
                     step_goal,
                     max_steps=cfg.step_max_steps,
                     on_event=lambda ev, _idx=idx: self._forward(ev, _idx),
+                    rag_context=rag_context,
                 )
             except Exception as e:
                 res = {

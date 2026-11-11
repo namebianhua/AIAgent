@@ -29,6 +29,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "不能编造工具名，也不能假装执行过动作。"
 )
 
+
 # 电脑操控模式（--full-computer）下的附加系统提示
 COMPUTER_SYSTEM_ADDENDUM = """
 
@@ -93,8 +94,28 @@ class RunOptions:
     # 电脑操控
     full_computer: bool = False  # True 时放开到整台电脑（scope="computer"）并启用 sys_*/ui_* 工具
 
+    # ---- RAG 知识库（第一~四阶段）----
+    use_rag: bool = True            # 总开关：关掉则不建引擎、不注册工具、不注入
+    rag_db_path: str = ""           # 留空用 ./agent_knowledge_base 或环境变量 RAG_DB_PATH
+    rag_collection: str = "agent_general_knowledge"
+    rag_embed_model: str = ""       # 留空用 bge-m3（rag_engine.DEFAULT_EMBED_MODEL）或环境变量 RAG_EMBED_MODEL
+    rag_ollama_url: str = ""        # 留空复用 ollama_base / OLLAMA_URL
+    rag_inject: bool = True         # 第二阶段：任务开始时把检索结果注入系统提示词
+    rag_tools: bool = True          # 第三阶段：注册 rag_search / rag_ingest / rag_status
+    rag_top_k: int = 3
+    # None = 沿用各知识库标定出的门槛（推荐）。余弦分数不可跨模型比较，
+    # 写死会在换 embedding 模型后失效，故默认交给库内标定值。
+    rag_min_score: Optional[float] = None
+    # 第四阶段：经验库
+    use_experience: bool = True     # 任务结束后把轨迹向量化沉淀，开始时语义召回
+    exp_collection: str = "agent_experience"
+    exp_include_failures: bool = True  # 失败任务也存（踩过的坑同样有价值）
+    exp_top_k: int = 2
+    exp_min_score: Optional[float] = None  # None = 沿用经验库标定门槛
+
     def to_dict(self) -> Dict[str, Any]:
         return {k: v for k, v in self.__dict__.items()}
+
 
 
 def describe_models(opts: RunOptions) -> List[Dict[str, Any]]:
@@ -157,7 +178,56 @@ def build_local_client(opts: RunOptions):
     )
 
 
+def build_rag(opts: RunOptions) -> Dict[str, Any]:
+    """装配知识库与经验库（第一 + 第四阶段）。
+
+    返回 {"engine": RagEngine|None, "experience": ExperienceStore|None, "error": str}
+    —— 任何环节失败都降级为 None，绝不抛异常打断任务启动：
+    RAG 是增强能力，chromadb 没装或 Ollama 没起时，Agent 应当照常工作。
+    """
+    import os
+
+    out: Dict[str, Any] = {"engine": None, "experience": None, "error": ""}
+    if not opts.use_rag:
+        out["error"] = "已通过配置关闭知识库"
+        return out
+
+    try:
+        from rag_engine import DEFAULT_EMBED_MODEL, RagConfig, RagEngine, RagUnavailable, get_engine
+
+        engine = get_engine(
+            db_path=opts.rag_db_path or os.getenv("RAG_DB_PATH", "./agent_knowledge_base"),
+            embed_model=opts.rag_embed_model or os.getenv("RAG_EMBED_MODEL", DEFAULT_EMBED_MODEL),
+            ollama_url=(
+                opts.rag_ollama_url or opts.ollama_base
+                or os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
+            ),
+        )
+        engine.default_collection = opts.rag_collection or engine.default_collection
+        out["engine"] = engine
+    except ImportError as e:
+        out["error"] = f"chromadb 未安装（pip install chromadb）：{e}"
+        return out
+    except Exception as e:
+        out["error"] = f"知识库初始化失败：{type(e).__name__}: {e}"
+        return out
+
+    if opts.use_experience:
+        try:
+            from experience import ExperienceStore
+
+            out["experience"] = ExperienceStore(
+                engine=engine,
+                collection=opts.exp_collection or "agent_experience",
+                include_failures=opts.exp_include_failures,
+            )
+        except Exception as e:
+            out["error"] = f"经验库初始化失败：{type(e).__name__}: {e}"
+    return out
+
+
 def build_api_router() -> Optional[ModelRouter]:
+
     import os
 
     api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
@@ -257,6 +327,30 @@ def execute(
             except Exception:
                 pass
 
+    # ---------- 知识库 / 经验库（第一 + 第四阶段）----------
+    # 放在注册表之前：第三阶段的工具要挂进 registry，第二阶段的注入要交给 Agent
+    rag = build_rag(opts)
+    rag_engine = rag.get("engine")
+    experience = rag.get("experience")
+    if rag_engine is None:
+        on_event(
+            {
+                "event": "log",
+                "level": "warn",
+                "message": f"知识库未启用：{rag.get('error') or '未知原因'}（Agent 将不使用本地资料）",
+            }
+        )
+    else:
+        on_event(
+            {
+                "event": "rag_ready",
+                "db_path": rag_engine.db_path.name if hasattr(rag_engine, "db_path") else "",
+                "collection": rag_engine.default_collection,
+                "embed_model": rag_engine.cfg.embed_model,
+                "experience": bool(experience),
+            }
+        )
+
     # ---------- 工具注册表 ----------
     registry = build_registry(sandbox) if opts.use_tools else None
     if registry is not None:
@@ -268,7 +362,29 @@ def execute(
             gate.auto_yes = gate.auto_yes or opts.auto_yes
             registry.approver = gate
 
+        # 第三阶段：把知识库检索注册成标准工具，Agent 遇到盲区可以自己查
+        if opts.rag_tools:
+            try:
+                from rag_tools import register_rag_tools
+
+                added = register_rag_tools(
+                    registry,
+                    rag_engine,
+                    sandbox=sandbox,
+                    experience=experience,
+                    default_collection=(
+                        rag_engine.default_collection if rag_engine else opts.rag_collection
+                    ),
+                    experience_collection=opts.exp_collection or "agent_experience",
+                )
+                on_event({"event": "rag_tools", "tools": added})
+            except Exception as e:
+                on_event(
+                    {"event": "rag_tools_error", "error": f"{type(e).__name__}: {e}"}
+                )
+
         if opts.use_skills:
+
             try:
                 skills = load_skills(agent_root)
                 report = register_skills(registry, skills, root=agent_root)
@@ -350,18 +466,38 @@ def execute(
     system_prompt = XHS_SYSTEM_PROMPT if opts.use_xhs else DEFAULT_SYSTEM_PROMPT
     if opts.full_computer:
         system_prompt += COMPUTER_SYSTEM_ADDENDUM
+    # 第三阶段：告诉模型知识库工具该怎么用、什么时候用
+    if opts.rag_tools and (rag_engine is not None or experience is not None):
+        try:
+            from rag_tools import RAG_TOOL_GUIDANCE
+
+            system_prompt += RAG_TOOL_GUIDANCE
+        except Exception:
+            pass
 
     agent = Agent(
         config=AgentConfig(
             system_prompt=system_prompt,
             max_steps=opts.max_steps,
+            # 第二阶段：检索结果注入系统提示词
+            use_rag=bool(opts.rag_inject and rag_engine is not None),
+            rag_top_k=opts.rag_top_k,
+            rag_min_score=opts.rag_min_score,
+            rag_collections=[opts.rag_collection] if opts.rag_collection else None,
+            # 第四阶段：语义经验召回注入
+            use_experience=bool(experience is not None),
+            exp_top_k=opts.exp_top_k,
+            exp_min_score=opts.exp_min_score,
         ),
         api_router=api_router,
         web_router=web_router,
         registry=registry,
         gateway=gateway,
         control=control,
+        rag=rag_engine if opts.rag_inject else None,
+        experience=experience,
     )
+
     if control is not None:
         control.ask_on_failure = bool(opts.pause_on_failure)
 
@@ -425,6 +561,37 @@ def execute(
             web_router.close_all()
         if opts.use_xhs:
             xhs_tools.close()
+
+    # ---------- 第四阶段：经验自我进化 ----------
+    # 任务结束（成功或失败）后把轨迹向量化沉淀，下次相似任务能被语义召回。
+    # 单轮与自主模式都走这里：autonomous.py 只负责 sqlite 台账，向量经验统一在此落库。
+    if experience is not None:
+        try:
+            exp_res = experience.ingest(
+                goal, result, task_id=str(result.get("task_id") or logger.task_id),
+                workspace=str(sandbox.root),
+            )
+        except Exception as e:
+            exp_res = {"status": "failed", "reason": f"{type(e).__name__}: {e}"}
+        status = exp_res.get("status")
+        if status in ("success", "unchanged"):
+            on_event(
+                {
+                    "event": "exp_saved",
+                    "task_id": exp_res.get("task_id"),
+                    "chunks": exp_res.get("chunk_count", 0),
+                    "status": status,
+                }
+            )
+        else:
+            on_event(
+                {
+                    "event": "exp_skipped",
+                    "status": status,
+                    "reason": str(exp_res.get("reason") or "")[:200],
+                }
+            )
+        result["experience_saved"] = status
 
     sandbox.audit(
         {

@@ -66,8 +66,13 @@ def run(
     ollama_base: str = "",
     ollama_model: str = "",
     full_computer: bool = False,
+    **rag_opts: Any,
 ) -> Dict[str, Any]:
-    """兼容旧入口：内部统一走 runner.execute。"""
+    """兼容旧入口：内部统一走 runner.execute。
+
+    rag_opts: 透传给 RunOptions 的知识库字段（use_rag / rag_inject / rag_tools /
+              use_experience / rag_collection 等），未提供时用 RunOptions 默认值。
+    """
     opts = RunOptions(
         mode=mode,
         workspace=workspace,
@@ -91,8 +96,10 @@ def run(
         ollama_base=ollama_base,
         ollama_model=ollama_model,
         full_computer=full_computer,
+        **rag_opts,
     )
     return execute(goal, opts)
+
 
 
 def print_trace(result: Dict[str, Any]) -> None:
@@ -135,6 +142,234 @@ def print_step_results(result: Dict[str, Any]) -> None:
 
 def _memory_store(workspace: Path) -> MemoryStore:
     return MemoryStore(workspace / ".agent" / "memory.db")
+
+
+def _rag_opts_from_args(args, workspace: Path) -> Dict[str, Any]:
+    """把 CLI 的 --no-rag* / --rag-* / --no-experience 等映射成 RunOptions 字段。"""
+    from rag_engine import DEFAULT_EMBED_MODEL
+
+    db_path = args.rag_db or str(workspace / "agent_knowledge_base")
+    return {
+        "use_rag": not args.no_rag,
+        "rag_db_path": db_path,
+        "rag_collection": args.rag_collection or "agent_general_knowledge",
+        "rag_embed_model": args.rag_embed_model or os.getenv("RAG_EMBED_MODEL", DEFAULT_EMBED_MODEL),
+        "rag_ollama_url": args.ollama_url or os.getenv("OLLAMA_URL", "http://127.0.0.1:11434"),
+        "rag_inject": not args.no_rag_inject,
+        "rag_tools": not args.no_rag_tools,
+        "rag_top_k": args.kb_top_k,
+        "rag_min_score": args.rag_min_score,     # None = 沿用库内标定门槛
+        "use_experience": not (args.no_experience or args.no_rag),
+        "exp_collection": args.exp_collection or "agent_experience",
+        "exp_min_score": args.exp_min_score,      # None = 沿用库内标定门槛
+    }
+
+
+# ===================== 知识库 CLI（第一~四阶段）=====================
+
+def _rag_engine(args, workspace: Path):
+    """按 CLI 参数构造 RagEngine；不可用时打印原因并返回 None。"""
+    from rag_engine import DEFAULT_EMBED_MODEL, RagConfig, RagEngine, RagUnavailable
+
+    cfg = RagConfig(
+        db_path=args.rag_db or str(workspace / "agent_knowledge_base"),
+        embed_model=args.rag_embed_model or os.getenv("RAG_EMBED_MODEL", DEFAULT_EMBED_MODEL),
+        ollama_url=args.ollama_url or os.getenv("OLLAMA_URL", "http://127.0.0.1:11434"),
+        chunk_size=args.rag_chunk_size,
+        chunk_overlap=args.rag_chunk_overlap,
+    )
+    try:
+        return RagEngine(cfg)
+    except RagUnavailable as e:
+        print(f"[知识库] 不可用：{e}", file=sys.stderr)
+        return None
+
+
+def _print_rag_results(results, query: str) -> None:
+    if not results:
+        print(f"（知识库中没有与「{query}」相关的内容）")
+        return
+    for i, r in enumerate(results, 1):
+        print(f"\n--- [{i}] 相关度 {r['relevance_score']:.2f} | 来源：{r.get('source') or '-'} ---")
+        print(r["content"].strip())
+
+
+def kb_add(args, workspace: Path) -> int:
+    """入库文件/目录。"""
+    engine = _rag_engine(args, workspace)
+    if engine is None:
+        return 1
+    probe = engine.probe()
+    if not probe.get("ok"):
+        print(f"[知识库] 向量化服务未就绪：{probe.get('reason')}", file=sys.stderr)
+        return 1
+    print(f"[知识库] embedding 模型 {probe['embed_model']}，向量维度 {probe.get('dim')}")
+
+    coll = args.rag_collection or engine.default_collection
+    targets = args.kb_path
+    total_chunks = 0
+    failed = 0
+    for t in targets:
+        p = Path(t).expanduser()
+        if not p.is_absolute():
+            p = (workspace / p).resolve()
+        try:
+            if p.is_dir():
+                res = engine.add_directory(p, collection_name=coll, recursive=not args.no_recursive)
+                print(f"[目录] {p}")
+                print(f"  扫描 {res.get('scanned', 0)} 个受支持文件，新增 {res.get('added', 0)} 个，"
+                      f"共 {res.get('chunks', 0)} 块，未变化 {res.get('unchanged', 0)} 个")
+                for err in (res.get("errors") or []):
+                    failed += 1
+                    print(f"  ✗ {err.get('file')}：{err.get('reason')}")
+                total_chunks += int(res.get("chunks", 0))
+            elif p.is_file():
+                res = engine.add_document(p, collection_name=coll)
+                status = res.get("status")
+                if status == "unchanged":
+                    print(f"[跳过] {p.name}：内容未变化（库中已有该版本，{res.get('chunk_count')} 块）")
+                    total_chunks += int(res.get("chunk_count", 0))
+                elif status == "success":
+                    print(f"[入库] {p.name}：{res.get('chunk_count')} 块")
+                    total_chunks += int(res.get("chunk_count", 0))
+                else:
+                    failed += 1
+                    print(f"[失败] {p.name}：{res.get('reason')}", file=sys.stderr)
+            else:
+                failed += 1
+                print(f"[失败] 路径不存在：{t}", file=sys.stderr)
+        except Exception as e:
+            failed += 1
+            print(f"[失败] {t}：{type(e).__name__}: {e}", file=sys.stderr)
+
+    print(f"\n知识库「{coll}」当前共 {engine._collection(coll).count()} 个文本块")
+    return 1 if failed and not total_chunks else 0
+
+
+def kb_search(args, workspace: Path) -> int:
+    engine = _rag_engine(args, workspace)
+    if engine is None:
+        return 1
+    coll = args.rag_collection or engine.default_collection
+    results = engine.search(args.kb_query, top_k=args.kb_top_k, collection_name=coll)
+    _print_rag_results(results, args.kb_query)
+    return 0
+
+
+def kb_status(args, workspace: Path) -> int:
+    engine = _rag_engine(args, workspace)
+    if engine is None:
+        return 1
+    print(json.dumps(engine.stats(), ensure_ascii=False, indent=2))
+    probe = engine.probe()
+    print("\n[向量化服务]", "就绪" if probe.get("ok") else f"不可用：{probe.get('reason')}")
+    return 0
+
+
+def kb_list(args, workspace: Path) -> int:
+    engine = _rag_engine(args, workspace)
+    if engine is None:
+        return 1
+    coll = args.rag_collection or engine.default_collection
+    sources = engine.list_sources(coll)
+    if not sources:
+        print(f"（知识库「{coll}」为空，用 --kb-add 入库文档）")
+        return 0
+    print(f"知识库「{coll}」共 {len(sources)} 个来源：")
+    for s in sources:
+        print(f"- {s['source_name'] or s['source_id']}  ({s['chunks']} 块)  入库于 {s['indexed_at']}")
+    return 0
+
+
+def kb_calibrate(args, workspace: Path) -> int:
+    """用库内已有文档自动标定相关度门槛（换 embedding 模型后必须重跑）。"""
+    engine = _rag_engine(args, workspace)
+    if engine is None:
+        return 1
+
+    targets = [args.rag_collection or engine.default_collection]
+    if args.exp_collection and args.exp_collection not in targets:
+        targets.append(args.exp_collection)
+
+    any_ok = False
+    for coll in targets:
+        if coll not in engine.list_collections():
+            print(f"[跳过] 知识库「{coll}」不存在")
+            continue
+        print(f"\n== 标定「{coll}」（embedding 模型：{engine.cfg.embed_model}）==")
+        res = engine.auto_calibrate(collection_name=coll)
+        if not res.get("ok"):
+            print(f"  ✗ {res.get('error')}")
+            continue
+        any_ok = True
+        s = res["samples"]
+        basis = ("跨文档取样" if res.get("sample_basis") == "cross_document"
+                 else "跨小节取样（单文档降级）")
+        print(f"  样本：{s['docs']} 篇文档 / {s['groups']} 个分组 / {s['chunks']} 块，"
+              f"正例对 {s['pos_pairs']}，负例对 {s['neg_pairs']}")
+        print(f"  取样方式：{basis}")
+        print(f"  正例 P10={res['pos_p10']}（最低 {res['pos_min']}）｜"
+              f"负例 P90={res['neg_p90']}（最高 {res['neg_max']}）")
+        print(f"  分离度 margin={res['margin']}（>0 表示正负例可区分）")
+        if res.get("persisted"):
+            print(f"  → 建议门槛 {res['suggested_min_score']}，已写入库元数据并自动沿用")
+        else:
+            print(f"  → 建议门槛 {res['suggested_min_score']}（未写入）")
+            if res.get("not_persisted_reason"):
+                print(f"  ⚠️ {res['not_persisted_reason']}")
+        print(f"  结论：{res['verdict']}")
+        if res.get("caveat"):
+            print(f"  ⚠️ {res['caveat']}")
+
+    if not any_ok:
+        print("\n没有可标定的知识库。请先用 --kb-add 入库文档"
+              "（至少 2 块；单篇文档会降级为跨小节取样）。", file=sys.stderr)
+        return 1
+    return 0
+
+
+def kb_exp(args, workspace: Path) -> int:
+    """经验库：状态 / 语义召回 / 从历史轨迹回灌。"""
+    from experience import ExperienceStore
+
+    engine = _rag_engine(args, workspace)
+    if engine is None:
+        return 1
+    store = ExperienceStore(engine=engine, collection=args.exp_collection)
+
+    if args.exp_query:
+        hits = store.recall(args.exp_query, k=args.kb_top_k, min_score=args.exp_min_score)
+        if not hits:
+            print(f"（没有找到与「{args.exp_query}」语义相近的历史任务经验）")
+            return 0
+        for i, h in enumerate(hits, 1):
+            print(h.to_card(i))
+            print()
+        return 0
+
+    if args.exp_reindex:
+        traces_dir = workspace / ".agent" / "traces"
+        files = sorted(traces_dir.glob("*.jsonl")) if traces_dir.is_dir() else []
+        if not files:
+            print(f"（{traces_dir} 下没有轨迹文件）")
+            return 0
+        print(f"从 {len(files)} 份历史轨迹回灌经验库……")
+        ok = skipped = failed = 0
+        for f in files:
+            res = store.ingest_from_trace_file(f)
+            status = res.get("status")
+            if status in ("success", "unchanged"):
+                ok += 1
+            elif status == "skipped":
+                skipped += 1
+            else:
+                failed += 1
+                print(f"  ✗ {f.name}：{res.get('reason')}")
+        print(f"完成：入库 {ok}，跳过 {skipped}，失败 {failed}")
+        return 0 if failed == 0 else 1
+
+    print(json.dumps(store.stats(), ensure_ascii=False, indent=2))
+    return 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -215,6 +450,45 @@ def main(argv: Optional[List[str]] = None) -> int:
         "工作区外写入与所有桌面动作需人工确认",
     )
 
+    # ---- 知识库 RAG（第一~四阶段）----
+    kb = parser.add_argument_group("知识库（RAG）")
+    kb.add_argument("--kb-add", nargs="+", metavar="PATH", dest="kb_path",
+                    help="把文件/目录解析并向量化后存入知识库，完成后退出（可传多个路径）")
+    kb.add_argument("--kb-search", metavar="QUERY", dest="kb_query",
+                    help="在知识库中做语义检索后退出")
+    kb.add_argument("--kb-status", action="store_true", help="查看知识库统计与向量化服务状态后退出")
+    kb.add_argument("--kb-list", action="store_true", help="列出知识库中已入库的文档后退出")
+    kb.add_argument("--kb-top-k", type=int, default=5, help="检索返回条数（默认 5）")
+    kb.add_argument("--rag-collection", default="",
+                    help="知识库名（默认 agent_general_knowledge）")
+    kb.add_argument("--rag-db", default="",
+                    help="向量库目录（默认 <工作区>/agent_knowledge_base）")
+    kb.add_argument("--rag-embed-model", default="",
+                    help="embedding 模型（默认 bge-m3，需先 ollama pull bge-m3）")
+    kb.add_argument("--rag-chunk-size", type=int, default=600, help="分块字符数（默认 600）")
+    kb.add_argument("--rag-chunk-overlap", type=int, default=80, help="分块重叠字符数（默认 80）")
+    kb.add_argument("--no-recursive", action="store_true", help="入库目录时不递归子目录")
+    kb.add_argument("--kb-calibrate", action="store_true",
+                    help="用库内已有文档自动标定相关度门槛后退出（换 embedding 模型后必须重跑）")
+    kb.add_argument("--rag-min-score", type=float, default=None,
+                    help="临时覆盖知识库的相关度门槛（默认沿用 --kb-calibrate 标定值）")
+    kb.add_argument("--no-rag", action="store_true",
+                    help="跑任务时完全关闭知识库（不建引擎、不注册工具、不注入）")
+    kb.add_argument("--no-rag-inject", action="store_true",
+                    help="关闭第二阶段的知识自动注入（仍保留 rag_search 主动检索工具）")
+    kb.add_argument("--no-rag-tools", action="store_true",
+                    help="不注册第三阶段的 rag_search / rag_ingest / rag_status / exp_recall 工具")
+    kb.add_argument("--no-experience", action="store_true",
+                    help="关闭第四阶段的经验库（不再沉淀任务经验，也不做语义召回）")
+    kb.add_argument("--exp-collection", default="agent_experience",
+                    help="经验库 collection 名（默认 agent_experience）")
+    kb.add_argument("--exp-query", metavar="GOAL",
+                    help="语义检索历史任务经验后退出（第四阶段）")
+    kb.add_argument("--exp-reindex", action="store_true",
+                    help="把 .agent/traces 下的历史轨迹回灌进经验库后退出")
+    kb.add_argument("--exp-min-score", type=float, default=None,
+                    help="临时覆盖经验召回的相关度门槛（默认沿用标定值）")
+
     # ---- T2 ----
     parser.add_argument("--xhs", action="store_true", help="启用小红书工具（T2 网页版操作）")
     parser.add_argument(
@@ -240,6 +514,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     # ---------- 一次性动作 ----------
     if args.xhs_login:
         return xhs_login(args.xhs_profile, timeout=args.xhs_login_timeout)
+
+    # ---------- 知识库一次性动作（RAG）----------
+    if args.kb_path:
+        return kb_add(args, workspace)
+    if args.kb_query:
+        return kb_search(args, workspace)
+    if args.kb_status:
+        return kb_status(args, workspace)
+    if args.kb_list:
+        return kb_list(args, workspace)
+    if args.kb_calibrate:
+        return kb_calibrate(args, workspace)
+    if args.exp_query or args.exp_reindex:
+        return kb_exp(args, workspace)
 
     if args.memory:
         stats = _memory_store(workspace).stats()
@@ -317,6 +605,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             ollama_base=args.ollama_url,
             ollama_model=args.local_model or "",
             full_computer=args.full_computer,
+            **_rag_opts_from_args(args, workspace),
         )
         serve(
             opts,
@@ -381,6 +670,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             ollama_base=args.ollama_url,
             ollama_model=args.local_model or "",
             full_computer=args.full_computer,
+            **_rag_opts_from_args(args, workspace),
         )
     except KeyboardInterrupt:
         print("\n已中断", file=sys.stderr)

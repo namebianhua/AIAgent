@@ -11,8 +11,27 @@ playwright==1.58.0
 
 # T3 自主任务：不需要额外依赖。
 # 长期记忆用标准库 sqlite3，HTTP 服务用标准库 http.server + SSE，
-# 定时任务用标准库 threading + json。刻意不引入 FastAPI / Chroma / FAISS，
+# 定时任务用标准库 threading + json。这部分刻意零重依赖，
 # 避免国内网络环境装不上依赖导致整套功能不可用。
+
+# 知识库 RAG（第一~四阶段，本轮新增）：以下为「可选依赖」。
+#   pip install chromadb          # 本地向量库（必需，缺了知识库自动降级为不启用）
+#   pip install pypdf             # 解析 PDF 才需要
+#   pip install python-docx       # 解析 .docx 才需要
+# 向量化走本机 Ollama 的 embedding 模型，需先拉取一次：
+#   ollama pull bge-m3
+# 为什么是 bge-m3 而不是 nomic-embed-text：后者是英文主导模型，中文语义几乎不区分。
+#   实测同一组中文对照（相关 vs 不相关）：nomic 间距 -0.020（倒挂，噪音分数高于正确答案），
+#   bge-m3 间距 +0.191（可区分）。中文知识库必须用中文/多语言 embedding 模型。
+# 设计原则：chromadb / Ollama 任一不可用时，Agent 照常工作（只是不带知识库），
+#   绝不因 RAG 依赖缺失而启动失败。详见 rag_engine.py / experience.py 的降级逻辑。
+# 常用命令：
+#   python main.py --kb-add docs/            # 把目录入库
+#   python main.py --kb-search "部署规范"     # 语义检索
+#   python main.py --kb-status               # 知识库状态与探活
+#   python main.py --exp-query "统计代码行数" # 检索历史任务经验
+#   python test_rag.py                       # 四阶段端到端自检
+
 
 # 交互层（控制台）：仍然零新增依赖。
 # 后端 http.server + SSE，前端一个 index.html + app.js + app.css（无 Node、无构建）。
