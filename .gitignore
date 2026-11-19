@@ -1,2 +1,43 @@
-.workbuddy
-_pycache_
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 运行态
+.agent/
+agent_knowledge_base/
+agent_knowledge_base.bak_*/
+*.log
+
+# 密钥
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+cookies*.json
+
+# 编辑器/系统
+.idea/
+.DS_Store
+Thumbs.db
+.vscode/settings.json
+
+# 构建产物
+build/
+dist/
+*.egg-info/
+
+# 现有忽略
+.workbuddy/

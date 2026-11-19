@@ -159,6 +159,9 @@ def _rag_opts_from_args(args, workspace: Path) -> Dict[str, Any]:
         "rag_tools": not args.no_rag_tools,
         "rag_top_k": args.kb_top_k,
         "rag_min_score": args.rag_min_score,     # None = 沿用库内标定门槛
+        # 第五阶段：混合检索（查询改写 + BM25 + RRF），解决口语与文档术语的词汇鸿沟
+        "rag_hybrid": not args.no_rag_hybrid,
+        "rag_expander_model": args.rag_expander_model,
         "use_experience": not (args.no_experience or args.no_rag),
         "exp_collection": args.exp_collection or "agent_experience",
         "exp_min_score": args.exp_min_score,      # None = 沿用库内标定门槛
@@ -296,34 +299,31 @@ def kb_calibrate(args, workspace: Path) -> int:
         if coll not in engine.list_collections():
             print(f"[跳过] 知识库「{coll}」不存在")
             continue
-        print(f"\n== 标定「{coll}」（embedding 模型：{engine.cfg.embed_model}）==")
-        res = engine.auto_calibrate(collection_name=coll)
+        dry_run = bool(getattr(args, "kb_calibrate_dry_run", False))
+        print(f"\n== 标定「{coll}」（embedding 模型：{engine.cfg.embed_model}）"
+              f"{'｜试运行，不写入' if dry_run else ''} ==")
+        res = engine.auto_calibrate(collection_name=coll, persist=not dry_run)
         if not res.get("ok"):
             print(f"  ✗ {res.get('error')}")
             continue
         any_ok = True
         s = res["samples"]
-        basis = ("跨文档取样" if res.get("sample_basis") == "cross_document"
-                 else "跨小节取样（单文档降级）")
-        print(f"  样本：{s['docs']} 篇文档 / {s['groups']} 个分组 / {s['chunks']} 块，"
-              f"正例对 {s['pos_pairs']}，负例对 {s['neg_pairs']}")
-        print(f"  取样方式：{basis}")
-        print(f"  正例 P10={res['pos_p10']}（最低 {res['pos_min']}）｜"
-              f"负例 P90={res['neg_p90']}（最高 {res['neg_max']}）")
-        print(f"  分离度 margin={res['margin']}（>0 表示正负例可区分）")
+        print(f"  样本：{s['docs']} 篇文档 / {s['sections']} 个小节 / {s['chunks']} 块")
+        print(f"  取样方式：伪查询走真实检索路径（相关命中 {s['pos_pairs']} 个，跨小节噪音 {s['neg_pairs']} 个）")
+        print(f"  相关命中地板 P10={res['pos_p10']}（最低 {res['pos_min']}）｜"
+              f"跨小节噪音天花板 P90={res['neg_p90']}（最高 {res['neg_max']}）")
+        print(f"  分离度 margin={res['margin']}（>0 表示相关命中高于噪音天花板）")
         if res.get("persisted"):
-            print(f"  → 建议门槛 {res['suggested_min_score']}，已写入库元数据并自动沿用")
+            print(f"  → 门槛 {res['suggested_min_score']}（≤相关地板，不会误杀），已写入库并自动沿用")
         else:
-            print(f"  → 建议门槛 {res['suggested_min_score']}（未写入）")
-            if res.get("not_persisted_reason"):
-                print(f"  ⚠️ {res['not_persisted_reason']}")
+            print(f"  → 门槛 {res['suggested_min_score']}（试运行未写入；去掉 --kb-calibrate-dry-run 即生效）")
         print(f"  结论：{res['verdict']}")
         if res.get("caveat"):
             print(f"  ⚠️ {res['caveat']}")
 
     if not any_ok:
         print("\n没有可标定的知识库。请先用 --kb-add 入库文档"
-              "（至少 2 块；单篇文档会降级为跨小节取样）。", file=sys.stderr)
+              "（需含 ≥2 个语义小节）。", file=sys.stderr)
         return 1
     return 0
 
@@ -470,6 +470,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     kb.add_argument("--no-recursive", action="store_true", help="入库目录时不递归子目录")
     kb.add_argument("--kb-calibrate", action="store_true",
                     help="用库内已有文档自动标定相关度门槛后退出（换 embedding 模型后必须重跑）")
+    kb.add_argument("--kb-calibrate-dry-run", action="store_true",
+                    help="只计算并打印建议门槛，不写入库（门槛标错会让检索静默失效，建议先试跑）")
     kb.add_argument("--rag-min-score", type=float, default=None,
                     help="临时覆盖知识库的相关度门槛（默认沿用 --kb-calibrate 标定值）")
     kb.add_argument("--no-rag", action="store_true",
@@ -478,6 +480,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="关闭第二阶段的知识自动注入（仍保留 rag_search 主动检索工具）")
     kb.add_argument("--no-rag-tools", action="store_true",
                     help="不注册第三阶段的 rag_search / rag_ingest / rag_status / exp_recall 工具")
+    kb.add_argument("--no-rag-hybrid", action="store_true",
+                    help="关闭第五阶段混合检索（查询改写 + BM25 + RRF），退回纯向量检索")
+    kb.add_argument("--rag-expander-model", default="",
+                    help="查询改写用的本地对话模型（默认 qwen2.5:7b-instruct，"
+                         "或环境变量 RAG_EXPANDER_MODEL）")
     kb.add_argument("--no-experience", action="store_true",
                     help="关闭第四阶段的经验库（不再沉淀任务经验，也不做语义召回）")
     kb.add_argument("--exp-collection", default="agent_experience",

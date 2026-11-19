@@ -49,6 +49,14 @@ DEFAULT_EMBED_MODEL = "bge-m3"
 # 默认相关度门槛（bge-m3 中文场景经验起点，请用 calibrate_scores 按语料标定）
 DEFAULT_MIN_SCORE = 0.35
 
+# 分块算法版本。参与内容指纹计算（见 RagEngine._content_hash）。
+# **每次修改分块逻辑都必须递增**，否则重新入库会被幂等检查判为 unchanged 而静默跳过，
+# 库里仍是旧切法的向量，改动看起来"没生效"且极难排查。
+# v1 纯字符数聚合分块
+# v2 结构感知：按标题切节、表格不跨块、长表格重复表头、块带【标题路径】前缀
+# v3 标题路径始终保留根标题（修排序倒挂）；同小节片段贪心合并（消除碎片块）；过滤 --- 分隔线
+CHUNKER_VERSION = 3
+
 
 class RagUnavailable(RuntimeError):
     """RAG 依赖缺失或本地服务不可用（上层应降级，而不是崩）。"""
@@ -70,7 +78,179 @@ class RagConfig:
     # 相关度门槛：低于此值的检索结果视为「未命中」，不注入、不返回。
     # 0.35 是 bge-m3 中文场景的经验起点，请用 calibrate_scores() 按自己的语料标定。
     min_score: float = DEFAULT_MIN_SCORE
+    # 混合检索的向量高置信短路：当原查询的向量通道 top1 已过门槛、
+    # 且与 top2 的分差 ≥ shortcut_gap 时，直接采信向量结果，不做 RRF 融合。
+    # 为什么需要：RRF 只看名次、丢弃分数量纲，会把「向量已明确做对」的结果
+    # 被「多个改写变体都排第 2」的块翻盘（实测退化 3 条）。详见 search_hybrid。
+    hybrid_shortcut: bool = True
+    # 短路所需的最小分差。取 0.02 的依据（_diag_gap.py 实测）：
+    #   向量做对组 gap 中位 0.040（退化组 0.027~0.040 需被短路保住）；
+    #   向量做错组 gap 中位 0.017（修复组多为 0.001~0.030，需照常进融合）。
+    #   0.02 落在两组之间，偏向让「不确定」的情况走融合。
+    shortcut_gap: float = 0.02
+    # 混合检索每个通道的候选池大小。**必须与 top_k 解耦**（固定常量）：
+    # 若随 top_k 变化，候选池大小就会变，RRF 名次随之漂移，
+    # 导致同一个问题在 --top-k=1 / --top-k=3 下返回不同答案（实测发生过）。
+    # 取 40 的理由：要显著大于常见 top_k（1~10）以覆盖候选，又不能大到
+    # 拖慢检索（每条查询变体都要对候选池做一次打分）。
+    hybrid_fetch: int = 40
 
+
+
+def _norm_source_id(path: str | os.PathLike[str]) -> str:
+    """把文件路径归一化成稳定的来源键，用于 ChromaDB 的精确匹配删除。
+
+    为什么必须归一化：ChromaDB 的 where={"source_id": ...} 是**精确字符串匹配**，
+    而 Windows 路径大小写不敏感。同一个文件可能先后以
+    `c:\\Users\\Lenovo\\Downloads\\x.md`（小写盘符）和
+    `C:\\Users\\Lenovo\\Downloads\\x.md`（大写盘符）入库，
+    删除旧块时匹配不到 → 旧向量残留 → 每次重建都累积过期块，检索质量持续劣化。
+
+    归一化规则（仅影响 source_id 这个匹配键，不影响展示用的 source_file）：
+    1. resolve() 拿到绝对规范路径（消除 .. 、相对路径、正斜杠混用）；
+    2. 分隔符统一为 \\；
+    3. 在 Windows 上整体转小写（NTFS 大小写不敏感，Linux/macOS 保留原样）。
+    """
+    p = Path(path).expanduser()
+    try:
+        p = p.resolve()
+    except Exception:
+        pass
+    s = str(p).replace("/", "\\") if os.name == "nt" else str(p)
+    return s.lower() if os.name == "nt" else s
+
+
+def _strip_title_prefix(text: str) -> str:
+    """去掉块首的【标题路径】前缀，只留正文（构造伪查询用）。"""
+    head = (text or "").lstrip()
+    if head.startswith("【"):
+        end = head.find("】")
+        if end > 0:
+            return head[end + 1:].strip()
+    return head.strip()
+
+
+def _make_pseudo_query(body: str, limit: int = 48) -> str:
+    """从块正文造一个「伪查询」：取首个句子片段，模拟真实用户提问的长度与信息量。
+
+    刻意不用整块正文当查询——那样与块本身几乎重合，余弦会逼近 1.0，
+    严重高估相关命中分数，标出的门槛同样偏高。
+    """
+    body = (body or "").strip()
+    if not body:
+        return ""
+    # 表格块：取表头 + 首行数据，等价于用户问"某项的取值"
+    if body.lstrip().startswith("|"):
+        rows = [r.strip() for r in body.split("\n") if r.strip().startswith("|")]
+        cells = [c.strip(" `") for r in rows[:3] for c in r.strip("|").split("|")]
+        cells = [c for c in cells if c and not set(c) <= set("-: ")]
+        return " ".join(cells[:6])[:limit]
+    # 普通文本：取第一句
+    m = re.split(r"(?<=[。！？；.!?])", body, maxsplit=1)
+    first = (m[0] if m else body).strip()
+    first = re.sub(r"^[>*#\-\s]+", "", first)          # 去掉 Markdown 引用/列表符号
+    first = first.replace("**", "").replace("`", "")    # 去掉强调与代码标记
+    return first[:limit].strip()
+
+
+def _tokenize(text: str) -> List[str]:
+    """中英文混合分词，零依赖。
+
+    - 英文/数字/标识符：按 ASCII 连续串切（保留 E4201、8443、batch_size 这类整体）；
+    - 中文：按字切（bigram 效果更好但内存翻倍，单字 + IDF 已足够区分）。
+    刻意不引 jieba：项目其余部分保持零重依赖，且中文单字 + BM25 的 IDF 权重
+    对「端口/吞吐/归因」这类术语词的区分已经够用。
+    """
+    if not text:
+        return []
+    tokens: List[str] = []
+    for m in re.finditer(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]", text):
+        tokens.append(m.group(0).lower())
+    return tokens
+
+
+def _identifier_tokens(query: str) -> List[str]:
+    """从查询里抽出「精确标识符」：错误码、端口号、参数名、版本号等。
+
+    这些是纯向量检索最容易漏的（embedding 会把 E4201 和 E4202 编码得很接近），
+    必须靠词法通道精确匹配。判定标准：含数字的字母数字串，或带下划线的标识符。
+    """
+    if not query:
+        return []
+    out: List[str] = []
+    for m in re.finditer(r"[A-Za-z0-9_]+", query):
+        tok = m.group(0)
+        if "_" in tok or re.search(r"[A-Za-z]", tok) and re.search(r"\d", tok):
+            out.append(tok)
+    return out
+
+
+class _BM25Index:
+    """极简 BM25（Okapi），零依赖。只为混合检索提供词法通道名次。
+
+    实现的是标准 BM25 公式：
+        score(D,Q) = Σ IDF(qi) · (f(qi,D)·(k1+1)) / (f(qi,D) + k1·(1-b+b·|D|/avgdl))
+        IDF(qi) = ln( (N - n(qi) + 0.5) / (n(qi) + 0.5) + 1 )
+    k1=1.5、b=0.75 是 Okapi 的经典默认值。
+    """
+
+    def __init__(self, documents: Sequence[str], ids: Sequence[str],
+                 k1: float = 1.5, b: float = 0.75) -> None:
+        self.k1 = k1
+        self.b = b
+        self.ids = list(ids)
+        self.docs = list(documents)
+        self.n = len(self.docs)
+        self.doc_tokens: List[List[str]] = [_tokenize(d) for d in self.docs]
+        self.doc_len = [len(t) for t in self.doc_tokens]
+        self.avgdl = (sum(self.doc_len) / self.n) if self.n else 0.0
+        # 词频表：doc_index -> {token: count}
+        self.tf: List[Dict[str, int]] = []
+        for toks in self.doc_tokens:
+            counter: Dict[str, int] = {}
+            for t in toks:
+                counter[t] = counter.get(t, 0) + 1
+            self.tf.append(counter)
+        # 文档频率：token -> 含该词的文档数
+        self.df: Dict[str, int] = {}
+        for counter in self.tf:
+            for t in counter:
+                self.df[t] = self.df.get(t, 0) + 1
+
+    def _idf(self, token: str) -> float:
+        n_t = self.df.get(token, 0)
+        if n_t == 0:
+            return 0.0
+        import math
+        return math.log((self.n - n_t + 0.5) / (n_t + 0.5) + 1.0)
+
+    def search(self, query: str, top_n: int) -> List[tuple]:
+        """返回 [(doc_id, score, content), ...]，按分数降序，score<=0 不返回。"""
+        if self.n == 0:
+            return []
+        q_tokens = _tokenize(query)
+        if not q_tokens:
+            return []
+        # 查询去重，避免重复词放大分数
+        q_set = list(dict.fromkeys(q_tokens))
+        scores: List[float] = [0.0] * self.n
+        for token in q_set:
+            idf = self._idf(token)
+            if idf <= 0:
+                continue  # 查询词不在任何文档里，跳过
+            for i in range(self.n):
+                f = self.tf[i].get(token, 0)
+                if f == 0:
+                    continue
+                dl = self.doc_len[i]
+                denom = f + self.k1 * (1 - self.b + self.b * (dl / self.avgdl if self.avgdl else 1))
+                scores[i] += idf * (f * (self.k1 + 1)) / denom
+        ranked = [(i, s) for i, s in enumerate(scores) if s > 0]
+        ranked.sort(key=lambda x: x[1], reverse=True)
+        out: List[tuple] = []
+        for i, s in ranked[:top_n]:
+            out.append((self.ids[i], s, self.docs[i]))
+        return out
 
 
 def _clean_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
@@ -122,6 +302,9 @@ class RagEngine:
         # 构造时给定的门槛，作为「该库没有标定值」时的回落基线。
         # 不能用 DEFAULT_MIN_SCORE 兜底，否则会覆盖调用方显式传入的配置。
         self._base_min_score = float(self.cfg.min_score)
+        # 检索链路的异常记录：混合检索内部有多处 except 会静默返回空结果，
+        # 没有这个字段就完全无法排查「为什么检索不到东西」。
+        self.last_error: str = ""
 
     # ===================== 向量化 =====================
 
@@ -226,6 +409,9 @@ class RagEngine:
     _TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
     # 表格分隔行：|---|---|
     _TABLE_SEP_RE = re.compile(r"^\s*\|[\s:\-|]+\|\s*$")
+    # Markdown 水平分隔线：--- / *** / ___（3 个及以上，独占一行）
+    # 必须过滤：这类行无语义，混进块里只会稀释向量、拉低命中率
+    _HR_RE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
 
     def _split_long(self, para: str) -> List[str]:
         """超长段落：先按句子切，单句仍超长则按固定长度硬切。"""
@@ -306,8 +492,18 @@ class RagEngine:
                 # 维护层级：同级替换，降级截断
                 heading_stack = heading_stack[: level - 1]
                 heading_stack.append(title)
-                # 路径只取最近两级，太长会稀释语义
-                current_title = " > ".join(heading_stack[-2:])
+                # 路径构造：**根标题必须始终保留**，最多再接最近两级小节。
+                # 根标题承载文档主题/产品名/系统名，是检索最强的区分信号。
+                # 早期版本写 heading_stack[-2:]（只取最近两级），深层小节因此丢掉
+                # 根标题，导致查询带产品名时「浅层章节压过真正含答案的深层章节」。
+                # 受控实测（块内容不变，仅补回根标题）：
+                #   「部署 HaloSync 的硬件规格」 硬件规格 0.584 → 0.763，
+                #   产品概述（对照，前缀本就完整）0.713 不变 → 排序倒挂被修正。
+                if len(heading_stack) <= 3:
+                    path_parts = heading_stack
+                else:
+                    path_parts = [heading_stack[0]] + heading_stack[-2:]
+                current_title = " > ".join(path_parts)
                 current_body = []
             else:
                 current_body.append(line)
@@ -320,6 +516,10 @@ class RagEngine:
 
         解决的核心问题：纯字符数聚合会把「上一节表格的尾巴 + 下一节的标题」
         揉进同一块，导致含答案的块语义被稀释、检索分数被相邻内容拉低。
+
+        同小节内的相邻片段会贪心合并装箱：表格与紧跟其后的补充说明
+        （如「| CPU | 4核 | 8核 |」+「> 吞吐上限由软件硬限决定」）
+        本属同一语义单元，拆成两块会让短块语义偏弱、还白占检索名额。
         """
         lines = text.split("\n")
         sections = self._split_sections(lines)
@@ -332,37 +532,58 @@ class RagEngine:
             # 前缀占用的预算要从正文里扣掉，否则块会超出 chunk_size
             budget = max(120, self.cfg.chunk_size - len(prefix))
 
-            # 把正文按「表格块 / 普通文本块」分段，表格不与其他内容混切
-            segments: List[Tuple[bool, List[str]]] = []  # (是否表格, 行列表)
-            cur_is_table = False
-            cur: List[str] = []
-            for line in body:
-                is_table = bool(self._TABLE_ROW_RE.match(line))
-                if cur and is_table != cur_is_table:
-                    segments.append((cur_is_table, cur))
-                    cur = []
-                cur_is_table = is_table
-                cur.append(line)
-            if cur:
-                segments.append((cur_is_table, cur))
+            pieces = self._section_pieces(body, budget)
+            if not pieces:
+                continue
 
-            for is_table, seg_lines in segments:
-                seg_text = "\n".join(l for l in seg_lines if l.strip()).strip()
-                if not seg_text:
-                    continue
-                if is_table:
-                    for piece in self._split_table(seg_lines, budget):
-                        piece = piece.strip()
-                        if piece:
-                            chunks.append(prefix + piece if prefix else piece)
-                elif len(seg_text) <= budget:
-                    chunks.append(prefix + seg_text if prefix else seg_text)
+            # 贪心装箱：在不超预算的前提下把同小节的片段合并成一个块
+            buf = ""
+            for piece in pieces:
+                if buf and len(buf) + 2 + len(piece) > budget:
+                    chunks.append(prefix + buf if prefix else buf)
+                    buf = piece
                 else:
-                    for piece in self._split_long(seg_text):
-                        chunks.append(prefix + piece if prefix else piece)
+                    buf = f"{buf}\n\n{piece}" if buf else piece
+            if buf:
+                chunks.append(prefix + buf if prefix else buf)
 
         # 去掉过短的碎块（<40 字符基本没有语义价值，只会当噪音被检索出来）
         return [c for c in chunks if len(c.strip()) >= 40]
+
+    def _section_pieces(self, body: List[str], budget: int) -> List[str]:
+        """把一个小节的正文切成片段：表格整体保留（超长则按行切并重复表头）。
+
+        表格与普通文本先分段，是因为表格行脱离表头就没有意义；
+        但分段之后仍会交给上层的装箱逻辑合并，不会各自成块。
+        """
+        segments: List[Tuple[bool, List[str]]] = []  # (是否表格, 行列表)
+        cur_is_table = False
+        cur: List[str] = []
+        for line in body:
+            # 过滤 Markdown 分隔线（--- / *** / ___）：无语义，混进块里只会稀释向量
+            if self._HR_RE.match(line):
+                continue
+            is_table = bool(self._TABLE_ROW_RE.match(line))
+            if cur and is_table != cur_is_table:
+                segments.append((cur_is_table, cur))
+                cur = []
+            cur_is_table = is_table
+            cur.append(line)
+        if cur:
+            segments.append((cur_is_table, cur))
+
+        pieces: List[str] = []
+        for is_table, seg_lines in segments:
+            seg_text = "\n".join(l for l in seg_lines if l.strip()).strip()
+            if not seg_text:
+                continue
+            if is_table:
+                pieces.extend(p.strip() for p in self._split_table(seg_lines, budget) if p.strip())
+            elif len(seg_text) <= budget:
+                pieces.append(seg_text)
+            else:
+                pieces.extend(p for p in self._split_long(seg_text) if p)
+        return pieces
 
     def _chunk_plain(self, text: str) -> List[str]:
         """无结构文本（非 Markdown）：按段落聚合到 chunk_size。"""
@@ -466,20 +687,27 @@ class RagEngine:
         raise ValueError(f"不支持的文件格式：{ext or '(无扩展名)'}")
 
     def _content_hash(self, text: str, filepath: str) -> str:
-        """内容指纹 = 正文 + 分块参数 + embedding 模型。
+        """内容指纹 = 正文 + 分块算法版本 + 分块参数 + embedding 模型。
 
         为什么不能只哈希正文：幂等入库靠这个指纹判断「是否已存在完全相同的版本」。
         若只算正文，那么改了 chunk_size / 分块策略 / 换了 embedding 模型之后重新入库，
         会被误判为 unchanged 而跳过——旧向量（错误的切分方式）继续留在库里，
         改动的分块逻辑等于没生效。把参数一起哈希，配置一变就强制重建。
+
+        为什么还要带 CHUNKER_VERSION：只改分块**算法**、不改任何**参数**时，
+        指纹不会变化，重建会静默失效。这是最难排查的一类问题——
+        代码改了、测试过了，但库里躺着的还是旧切法的向量。
+        所以每次调整分块逻辑都必须递增该版本号。
         """
         h = hashlib.sha256()
         h.update(text.encode("utf-8", errors="replace"))
         h.update(
+            f"|chunker={CHUNKER_VERSION}"
             f"|chunk={self.cfg.chunk_size},{self.cfg.chunk_overlap}"
             f"|embed={self.cfg.embed_model}".encode("utf-8")
         )
         return h.hexdigest()[:32]
+
 
     # ===================== collection 管理 =====================
 
@@ -590,6 +818,9 @@ class RagEngine:
         with self._lock:
             self._collections.pop(collection_name, None)
             self._space.pop(collection_name, None)
+            cache = getattr(self, "_bm25_cache", None)
+            if isinstance(cache, dict):
+                cache.pop(collection_name, None)  # 库已删除，词法索引一并丢弃
         meta = self._load_meta()
         if meta.pop(collection_name, None) is not None:
             self._save_meta(meta)
@@ -661,6 +892,10 @@ class RagEngine:
         ids = [f"{doc_id}-{i}" for i in range(len(chunks))]
         metas = [{**base, "chunk_index": i, "chunk_total": len(chunks)} for i in range(len(chunks))]
         coll.add(ids=ids, embeddings=embeddings, metadatas=metas, documents=chunks)
+        # 正文已变，BM25 词法索引必须失效重建。
+        # 不能只靠缓存 key 里的 len(docs)：add_text 的流程是「先删旧块再加新块」，
+        # 若新旧块数恰好相同，key 不变 → 缓存命中 → 继续用旧正文索引（静默 stale）。
+        self._bump_bm25_stamp(name)
 
         meta = self._load_meta()
         entry = meta.get(name) or {}
@@ -683,10 +918,12 @@ class RagEngine:
         """入库单个文件。同一文件内容未变时返回 status=unchanged。"""
         path = Path(filepath).expanduser()
         text = self.parse_file(path)
+        # source_id 用归一化键（匹配/删除用），source_file 保留原样（展示用）
+        source_key = _norm_source_id(path)
         if not text.strip():
             return {"status": "skipped", "reason": "文件内容为空",
                     "collection": collection_name or self.default_collection,
-                    "source_id": str(path), "chunk_count": 0}
+                    "source_id": source_key, "chunk_count": 0}
         try:
             st = path.stat()
             extra = {"source_file": str(path), "source_filename": path.name,
@@ -696,7 +933,7 @@ class RagEngine:
         merged = {**extra, **(metadata or {})}
         res = self.add_text(
             text,
-            source_id=str(path),
+            source_id=source_key,
             collection_name=collection_name,
             metadata=merged,
             source_name=path.name,
@@ -768,15 +1005,59 @@ class RagEngine:
     # ===================== 删除 =====================
 
     def delete_by_source(self, source_id: str, collection_name: Optional[str] = None) -> int:
-        """按来源删除全部块（重新入库前清理旧版本）。"""
+        """按来源删除全部块（重新入库前清理旧版本）。
+
+        先走精确匹配（快，覆盖归一化键入库的新数据）；若删不到任何块，
+        再扫描全部 source_id 做**归一化比对**兜底——用于清理历史遗留数据：
+        归一化之前入库的块，source_id 是 `c:\\...` / `C:\\...` 这类原始写法，
+        与新键字面不等，精确匹配删不掉，会一直残留在库里污染检索。
+        """
         name = collection_name or self.default_collection
         try:
             coll = self._collection(name)
-            before = coll.count()
-            coll.delete(where={"source_id": source_id})
-            return max(0, before - coll.count())
         except Exception:
             return 0
+
+        target = _norm_source_id(source_id)
+        deleted = 0
+        # 依次尝试：归一化键（覆盖新数据）→ 原始入参（防御性兼容）
+        for key in dict.fromkeys([target, source_id]):
+            if not key:
+                continue
+            try:
+                before = coll.count()
+                coll.delete(where={"source_id": key})
+                deleted += max(0, before - coll.count())
+            except Exception:
+                continue
+        if deleted:
+            self._bump_bm25_stamp(name)  # 正文已删，词法索引必须失效
+            return deleted
+
+        # 兜底：扫描历史遗留的非归一化 source_id
+        try:
+            res = coll.get(include=["metadatas"], limit=min(coll.count(), 5000) or 1)
+        except Exception:
+            return 0
+        stale_ids = set()
+        for m in (res.get("metadatas") or []):
+            m = m or {}
+            sid = m.get("source_id")
+            if isinstance(sid, str) and sid and _norm_source_id(sid) == target:
+                stale_ids.add(sid)
+        if not stale_ids:
+            return 0
+        removed = 0
+        for sid in stale_ids:
+            try:
+                before = coll.count()
+                coll.delete(where={"source_id": sid})
+                removed += max(0, before - coll.count())
+            except Exception:
+                continue
+        if removed:
+            self._bump_bm25_stamp(name)  # 兜底删除同样会让正文变化，词法索引必须失效
+        return removed
 
     def delete_document(self, filepath: str | os.PathLike[str],
                         collection_name: Optional[str] = None) -> int:
@@ -851,17 +1132,438 @@ class RagEngine:
         collections: Sequence[str],
         top_k: int = 3,
         min_score: Optional[float] = None,
+        hybrid: bool = False,
+        rrf_k: int = 60,
     ) -> List[Dict[str, Any]]:
-        """跨多个 collection 检索后统一排序（知识库 + 经验库联检用）。"""
-        merged: List[Dict[str, Any]] = []
+        """跨多个 collection 检索后统一排序（知识库 + 经验库联检用）。
+
+        hybrid=False（纯向量）：各库分数同量纲（同一 embedding 模型 + cosine 空间），
+        直接按 relevance_score 归并即可。
+
+        hybrid=True：**不能**直接按 relevance_score / rrf_score 排序。
+          search_hybrid 有两条出口，rrf_score 的量纲不同：
+            · 向量高置信短路 → rrf_score 被设成余弦分（约 0.6）
+            · 正常 RRF 融合   → rrf_score 是名次倒数之和（约 0.07）
+          跨库比大小会让「走了短路的库」无条件压过「走了融合的库」，
+          与内容相关性完全无关。所以把每个库的结果当成一个排名，
+          再做一次 RRF，量纲统一后才可跨库比较。
+        """
+        k = max(1, int(top_k))
+        rankings: List[List[Dict[str, Any]]] = []
         for name in collections:
             if not name:
                 continue
-            merged.extend(self.search(query, top_k=top_k, collection_name=name,
-                                      min_score=min_score))
-        merged.sort(key=lambda x: x["relevance_score"], reverse=True)
-        return merged[: max(1, top_k)]
+            if hybrid:
+                rl = self.search_hybrid(query, top_k=k, collection_name=name,
+                                        min_score=min_score, rrf_k=rrf_k)
+            else:
+                rl = self.search(query, top_k=k, collection_name=name,
+                                 min_score=min_score)
+            if rl:
+                rankings.append(rl)
+        if not rankings:
+            return []
 
+        if not hybrid:
+            merged = [x for r in rankings for x in r]
+            merged.sort(key=lambda x: x.get("relevance_score", 0.0), reverse=True)
+            return merged[:k]
+
+        if len(rankings) == 1:
+            return rankings[0][:k]
+
+        fused: Dict[str, Dict[str, Any]] = {}
+        for rl in rankings:
+            for rank, item in enumerate(rl, 1):
+                # 不同库的 id 可能同形，用 (collection, id) 做唯一键
+                key = f"{item.get('collection') or ''}|{item.get('id') or ''}"
+                slot = fused.get(key)
+                if slot is None:
+                    slot = dict(item)
+                    slot["_x_rrf"] = 0.0
+                    fused[key] = slot
+                slot["_x_rrf"] += 1.0 / (rrf_k + rank)
+        out = list(fused.values())
+        for it in out:
+            it["rrf_score"] = round(it.pop("_x_rrf"), 6)
+        out.sort(key=lambda x: (x["rrf_score"], x.get("relevance_score", 0.0)),
+                 reverse=True)
+        return out[:k]
+
+    # ===================== 混合检索（第五阶段）=====================
+    #
+    # 为什么需要：纯向量检索跨不过「词汇鸿沟」。实测严格评测集 20 条口语化查询失败 6 条，
+    # 全是用户口语与文档术语字面不重叠（「最多能跑多快」vs「吞吐上限 12,000 条/秒」、
+    # 「防火墙放行哪些号」vs「端口清单 8443」）。人工把查询改写成文档术语后，6/6 全部修复。
+    #
+    # 三条通道互补：
+    #   1. 原查询向量检索     —— 语义相近即可命中（常规问法的主力）
+    #   2. 改写查询向量检索   —— 跨词汇鸿沟（口语 → 术语）
+    #   3. BM25 词法检索      —— 精确标识符（错误码 E4201、端口 8443、参数 batch_size）
+    # 用 RRF（Reciprocal Rank Fusion）融合：只看各通道的**名次**不看分数量纲，
+    # 因此不必担心「向量余弦」和「BM25 分数」不可比的问题。
+
+    def _get_expander(self, expander: Any = None) -> Any:
+        """取查询改写器（进程内复用）；不可用时返回 None。"""
+        exp = expander if expander is not None else getattr(self, "expander", None)
+        if exp is not None:
+            return exp
+        try:
+            from query_expander import get_expander
+            exp = get_expander()
+            self.expander = exp
+            return exp
+        except Exception:
+            return None
+
+    def _expand_query(self, query: str, expander: Any = None) -> Any:
+        """取查询扩展结果，按通道分组返回。
+
+        返回对象带 .vector_queries（原查询 + 书面问句改写）与
+        .lexical_queries（原查询 + 术语词袋）两个属性。
+        改写器不可用/调用失败时返回一个只含原查询的降级对象，
+        保证混合检索在任何情况下都能工作（只是少了扩展增益）。
+        """
+        from query_expander import Expansion
+
+        exp = self._get_expander(expander)
+        if exp is None:
+            return Expansion(query=query, ok=False)
+        try:
+            result = exp.expand_structured(query)
+        except Exception as e:
+            self.last_error = f"_expand_query: {type(e).__name__}: {e}"
+            return Expansion(query=query, ok=False)
+        # 防御：改写器返回空查询时不要污染检索
+        if not result or not (result.query or "").strip():
+            return Expansion(query=query, ok=False)
+        return result
+
+    def _vector_ranked(self, query: str, name: str, fetch: int,
+                       where: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """单条查询的向量检索排序表（不做门槛过滤，融合后再统一判定）。"""
+        try:
+            coll = self._collection(name)
+            res = coll.query(
+                query_embeddings=[self._embed_one(query)],
+                n_results=max(1, min(fetch, max(1, coll.count()))),
+                where=where or None,
+                # 注意：ids **不能**写进 include —— ChromaDB 只接受
+                # documents/embeddings/metadatas/distances/uris/data，传 ids 会抛
+                # ValueError（而 ids 本来就会默认返回）。
+                # 这个错误曾被下面的 except 静默吞掉，导致混合检索恒返回空列表，
+                # 所以这里把异常记进 self.last_error，便于排查。
+                include=["documents", "metadatas", "distances"],
+            )
+        except Exception as e:
+            self.last_error = f"_vector_ranked: {type(e).__name__}: {e}"
+            return []
+        docs = (res.get("documents") or [[]])[0]
+        metas = (res.get("metadatas") or [[]])[0]
+        dists = (res.get("distances") or [[]])[0]
+        ids = (res.get("ids") or [[]])[0]
+        out: List[Dict[str, Any]] = []
+        for i, doc in enumerate(docs):
+            dist = dists[i] if i < len(dists) else 0.0
+            meta = metas[i] if i < len(metas) and metas[i] else {}
+            out.append({
+                "id": ids[i] if i < len(ids) and ids[i] else f"{name}#{i}",
+                "content": doc or "",
+                "metadata": dict(meta),
+                "distance": float(dist) if isinstance(dist, (int, float)) else 0.0,
+                "relevance_score": self._relevance(name, dist),
+                "source": meta.get("source_name") or meta.get("source_file") or "",
+                "collection": name,
+                "channel": "vector",
+            })
+        out.sort(key=lambda x: x["relevance_score"], reverse=True)
+        return out
+
+    def search_hybrid(
+        self,
+        query: str,
+        top_k: int = 3,
+        collection_name: Optional[str] = None,
+        min_score: Optional[float] = None,
+        where: Optional[Dict[str, Any]] = None,
+        expand: bool = True,
+        use_lexical: bool = True,
+        rrf_k: int = 60,
+        expander: Any = None,
+    ) -> List[Dict[str, Any]]:
+        """混合检索：查询改写 + 多路向量 + BM25 词法，RRF 融合排序。
+
+        门槛语义（重要）：标定出的 min_score 是**向量余弦**口径，所以只用它过滤
+        「向量通道」的候选，保证门槛的可解释性不被融合分数污染。
+        纯词法命中的候选（向量分不达标但精确匹配到标识符）单独放行，
+        且必须满足「查询里的标识符原样出现在块中」这一硬条件，避免引入噪音。
+
+        返回结果按融合分排序，每项额外带：
+          rrf_score     融合分（仅用于排序）
+          matched_by    命中来源：vector / vector+lexical / lexical
+          variants_used 实际参与检索的查询变体
+        """
+        name = collection_name or self.default_collection
+        query = (query or "").strip()
+        if not query or name not in self.list_collections():
+            return []
+        threshold = self._min_score_for(name) if min_score is None else float(min_score)
+        try:
+            total = self._collection(name).count()
+        except Exception:
+            return []
+        if total == 0:
+            return []
+
+        k = max(1, int(top_k))
+        # 候选池大小必须与 top_k **解耦**，固定为常量。
+        # 原来写 fetch = max(k*4, 10)，后果是 top_k 不只改变返回条数，
+        # 还改变每个通道的候选池 → RRF 名次随之变化 → 同一个问题在
+        # --top-k=1 和 --top-k=3 下给出不同答案（实测 top_k=1 时 top1 是
+        # 完全错误的块，top_k=3 才正确）。这让检索结果不可预期、指标不可比。
+        # 固定候选池后，top_k 只做截断，排序保持稳定。
+        fetch = min(self.cfg.hybrid_fetch, max(1, total))
+
+        # ---- 向量高置信短路 ----
+        # RRF 只看名次、丢弃分数量纲：向量通道里「0.625 vs 0.622」和
+        # 「0.60 vs 0.40」都同样表现为 rank1/rank2（1/61 vs 1/62），
+        # 于是「两个改写变体都排第 2」的块能击败「原查询向量排第 1」的块。
+        # 实测后果：严格集修复 4 条却退化 3 条，净增益只有 +1。
+        #
+        # 所以当向量通道已经给出**高置信**答案时，直接采信它，不再融合。
+        # 判据用实测数据（_diag_gap.py）：
+        #   退化组「数据从源头到目标…」gap=0.027、「上证指数跌了多少」gap=0.040
+        #   → top1 过门槛且分差明确，属于向量本已做对、不该被融合翻盘的情形；
+        #   修复组「买哪几个行业」top1=0.492、「防火墙放行哪些号」top1=0.523
+        #   → 都**低于**门槛 0.5284，短路条件不成立，照常进融合（这正是它们被修好的原因）。
+        # 即：短路只拦「向量已确定」的情况，对「向量不确定」的情况完全不影响。
+        if self.cfg.hybrid_shortcut:
+            try:
+                base = self._vector_ranked(query, name, fetch, where)
+            except Exception:
+                base = []
+            passed = [b for b in base if b["relevance_score"] >= threshold]
+            if len(passed) >= 2:
+                gap = passed[0]["relevance_score"] - passed[1]["relevance_score"]
+                if gap >= self.cfg.shortcut_gap:
+                    out = passed[:k]
+                    # rrf_score 必须与正常融合分支同量纲（名次倒数之和），
+                    # 否则跨库 search_multi 比较时会失真——短路分支若填余弦分（~0.6），
+                    # 会无条件压过融合分支的名次倒数（~0.07），与相关性无关。
+                    # 短路结果是单一排名表，按 RRF 公式逐个赋分即可对齐量纲。
+                    for rank, it in enumerate(out, 1):
+                        it["matched_by"] = "vector_shortcut"
+                        it["rrf_score"] = round(1.0 / (rrf_k + rank), 6)
+                        it["variants_used"] = [query]
+                    return out
+            # 只有 1 个过门槛（或 0 个）时不短路：
+            # 这正说明向量通道不确定，必须交给改写与词法通道补救。
+
+        # ---- 查询扩展：两个通道用不同的查询形式 ----
+        # 向量通道要「书面问句」（完整句式才有稳定语义方向）；
+        # 词法通道要「术语词袋」（BM25 按词项匹配，整句会引入大量低 IDF 虚词噪音）。
+        # 实测依据：把术语词袋喂给向量通道，严格集 top1 命中从 3/6 掉到 1/6。
+        if expand:
+            expansion = self._expand_query(query, expander)
+            vec_queries = expansion.vector_queries
+            lex_queries = expansion.lexical_queries
+            expanded_ok = bool(getattr(expansion, "ok", False))
+        else:
+            vec_queries, lex_queries, expanded_ok = [query], [query], False
+
+        def _dedup(items: List[str]) -> List[str]:
+            out: List[str] = []
+            for it in items:
+                it = (it or "").strip()
+                if it and it not in out:
+                    out.append(it)
+            return out
+
+        vec_queries = _dedup(vec_queries)[:4] or [query]
+        lex_queries = _dedup(lex_queries)[:4] or [query]
+        variants = vec_queries if vec_queries == lex_queries else vec_queries + lex_queries[1:]
+
+        rankings: List[List[Dict[str, Any]]] = []
+        for v in vec_queries:
+            rl = self._vector_ranked(v, name, fetch, where)
+            if rl:
+                rankings.append(rl)
+        if not rankings:
+            return []
+
+        if use_lexical:
+            # 多条术语查询各自出一个排序表，一起进 RRF；
+            # BM25 索引在 _bm25_index 内按 collection 缓存，多次调用不会重复建索引
+            for lq in lex_queries:
+                rl = self._lexical_ranked(lq, name, fetch, where)
+                if rl:
+                    rankings.append(rl)
+
+        # ---- RRF 融合 ----
+        # 用 item["channel"] 判断来源，不用 `rank_list is lexical` 的身份比较：
+        # 后者依赖变量引用不变，一旦将来对 rankings 做拷贝/过滤就会静默失效。
+        fused: Dict[str, Dict[str, Any]] = {}
+        for rank_list in rankings:
+            for rank, item in enumerate(rank_list, 1):
+                key = item["id"]
+                slot = fused.get(key)
+                if slot is None:
+                    slot = {**item, "rrf_score": 0.0, "_vec": 0.0, "_lex": False}
+                    fused[key] = slot
+                slot["rrf_score"] += 1.0 / (rrf_k + rank)
+                slot["_vec"] = max(slot["_vec"], float(item.get("relevance_score") or 0.0))
+                if item.get("channel") == "lexical":
+                    slot["_lex"] = True
+                else:
+                    # 向量通道带完整 metadata/source，用它补全词法通道的空缺
+                    if not slot.get("metadata"):
+                        slot["metadata"] = item.get("metadata") or {}
+                    if not slot.get("source"):
+                        slot["source"] = item.get("source") or ""
+
+        # ---- 门槛判定 ----
+        id_tokens = _identifier_tokens(query)
+        admitted: List[Dict[str, Any]] = []
+        need_backfill: List[Dict[str, Any]] = []
+        for slot in fused.values():
+            vec_score = slot["_vec"]
+            passed_vec = vec_score >= threshold
+            # 纯词法放行条件：查询含标识符（错误码/端口/参数名）且原样出现在块里。
+            # 这个硬条件是刻意的——词法分数与余弦不同量纲，不能直接套门槛，
+            # 所以改用「精确标识符必须出现在正文」作为更严格的可解释判据。
+            passed_lex = bool(
+                slot["_lex"] and not passed_vec and id_tokens
+                and any(t.lower() in (slot["content"] or "").lower() for t in id_tokens)
+            )
+            if not (passed_vec or passed_lex):
+                continue
+            slot["relevance_score"] = round(vec_score, 4)
+            slot["rrf_score"] = round(slot["rrf_score"], 6)
+            slot["matched_by"] = ("vector+lexical" if (passed_vec and slot["_lex"])
+                                  else ("lexical" if passed_lex else "vector"))
+            slot.pop("_vec", None)
+            slot.pop("_lex", None)
+            slot.pop("channel", None)
+            slot["variants_used"] = variants
+            if not slot.get("metadata") and not slot.get("source"):
+                need_backfill.append(slot)  # 仅被词法通道命中，出处待补
+            admitted.append(slot)
+
+        if need_backfill:
+            self._backfill_meta(name, need_backfill)
+
+        # 融合分优先；同分时用向量相关度兜底（融合分粒度粗，容易并列）
+        admitted.sort(key=lambda x: (x["rrf_score"], x["relevance_score"]), reverse=True)
+        return admitted[:k]
+
+    # ---------- BM25 词法通道 ----------
+    def _bm25_index(self, name: str) -> Optional["_BM25Index"]:
+        """构造（或复用）某 collection 的 BM25 索引。
+
+        缓存失效判定用 (块数, 变更戳)：块数变化能覆盖增删，
+        变更戳覆盖「删 N 条同时加 N 条」这种块数不变的替换。
+        """
+        cache = getattr(self, "_bm25_cache", None)
+        if cache is None:
+            cache = self._bm25_cache = {}
+        try:
+            coll = self._collection(name)
+            count = coll.count()
+            res = coll.get(include=["documents"], limit=min(count, 20000) or 1)
+        except Exception:
+            return None
+        docs = list(res.get("documents") or [])
+        ids = list(res.get("ids") or [])
+        if not docs:
+            return None
+        stamp = int(getattr(self, "_bm25_stamp", {}).get(name, 0))
+        key = (name, len(docs), stamp)
+        hit = cache.get(name)
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        index = _BM25Index(docs, ids)
+        cache[name] = (key, index)
+        return index
+
+    def _bump_bm25_stamp(self, name: str) -> None:
+        stamps = getattr(self, "_bm25_stamp", None)
+        if stamps is None:
+            stamps = self._bm25_stamp = {}
+        stamps[name] = int(stamps.get(name, 0)) + 1
+
+    def _lexical_ranked(self, query: str, name: str, fetch: int,
+                        where: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """BM25 词法检索排序表。词法分数不进门槛判定，只提供名次参与 RRF。"""
+        index = self._bm25_index(name)
+        if index is None:
+            return []
+        try:
+            scored = index.search(query, fetch)
+        except Exception:
+            return []
+        out: List[Dict[str, Any]] = []
+        # where 过滤：BM25 索引本身不认识 metadata 条件，必须在这里补一道，
+        # 否则调用方传了 where 时，词法通道会返回违反过滤条件的块。
+        allowed_ids: Optional[set] = None
+        if where:
+            try:
+                coll = self._collection(name)
+                res = coll.get(where=where, include=[], limit=min(coll.count(), 20000) or 1)
+                allowed_ids = set(res.get("ids") or [])
+            except Exception:
+                allowed_ids = set()  # 条件非法时宁可返回空，也不返回越界结果
+        for doc_id, bm25_score, content in scored:
+            if bm25_score <= 0:
+                continue
+            if allowed_ids is not None and doc_id not in allowed_ids:
+                continue
+            out.append({
+                "id": doc_id,
+                "content": content,
+                "metadata": {},          # 词法通道不取 metadata，融合时由向量通道或回填补全
+                "distance": 0.0,
+                "relevance_score": 0.0,  # 词法分与余弦不同量纲，不参与门槛
+                "bm25_score": round(bm25_score, 4),
+                "source": "",
+                "collection": name,
+                "channel": "lexical",
+            })
+        return out
+
+    def _backfill_meta(self, name: str, slots: List[Dict[str, Any]]) -> None:
+        """为「仅被词法通道命中」的块补全 metadata / source。
+
+        BM25 索引只存正文，不带元数据。若某块只在词法通道命中，
+        不补全就会返回一条**没有出处**的检索结果——用户看到答案却不知来自哪个文件，
+        引用与追责都无从谈起。这里按 id 批量取回，一次查询搞定。
+        """
+        if not slots:
+            return
+        ids = [s["id"] for s in slots if s.get("id")]
+        if not ids:
+            return
+        try:
+            res = self._collection(name).get(ids=ids, include=["metadatas"])
+        except Exception:
+            return
+        metas = res.get("metadatas") or []
+        got_ids = res.get("ids") or []
+        lookup = {i: (metas[n] or {}) for n, i in enumerate(got_ids) if n < len(metas)}
+        for slot in slots:
+            meta = lookup.get(slot.get("id"))
+            if not meta:
+                continue
+            slot["metadata"] = dict(meta)
+            slot["source"] = (meta.get("source_name") or meta.get("source_file")
+                              or slot.get("source") or "")
+
+    def search_lexical(self, query: str, top_k: int = 5,
+                       collection_name: Optional[str] = None) -> List[Dict[str, Any]]:
+        """纯 BM25 词法检索（调试/精确标识符查询用）。"""
+        name = collection_name or self.default_collection
+        hits = self._lexical_ranked((query or "").strip(), name, max(1, int(top_k)))
+        self._backfill_meta(name, hits)  # 独立调用时同样要有出处
+        return hits[: max(1, int(top_k))]
 
     @staticmethod
     def format_context(results: Sequence[Dict[str, Any]], max_chars: int = 3000) -> str:
@@ -1022,16 +1724,18 @@ class RagEngine:
     ) -> Dict[str, Any]:
         """从库内已有数据自动标定相关度门槛，无需人工标注正负例。
 
-        取样思路（无监督），分两种情况：
-        - 多篇文档：正例 = 同文档内块对；负例 = 跨文档块对（主题通常不同）。
-        - 单篇文档：跨文档负例无从构造，降级为「按小节」取样——
-          正例 = 同小节内的块对（标题前缀相同，语义本就接近）；
-          负例 = 跨小节的块对（不同章节，相关性显著更低）。
-          小节身份取自结构分块写入的【标题路径】前缀。
+        取样走**真实检索路径**（query → chunk），而不是块与块之间的余弦：
+        1. 从每个块的正文造一个「伪查询」（剥掉标题前缀，取首句或表格首行）；
+        2. 用伪查询调 search()，记录它命中**自己那块**的分数 → 相关命中地板；
+        3. 同一伪查询在**其他小节**块上的最高分 → 噪音天花板；
+        4. 门槛取两者的中点：低于地板不会误杀有效结果，又能压住大部分噪音。
 
-        取正例分布的低分位（P10）作为门槛：既容忍同组内的正常波动，
-        又能滤掉组间噪音。块数不足 2 时无法标定，返回 ok=False。
+        为什么不按「同文档/跨文档」分组取样：加了【标题路径】前缀后，
+        跨文档块对因标题不同而天然虚低，用它当噪音会低估天花板、把门槛标得偏高，
+        实测会把大量有效查询误杀。真实 RAG 里最典型的噪音是「命中同一份文档的
+        错误章节」，所以负例统一按跨小节统计。
 
+        :param sample_pairs: 最多取多少个伪查询样本（固定随机种子，结果可复现）
         :param persist: 标定成功后是否写入库元数据（之后检索自动沿用）
         """
         name = collection_name or self.default_collection
@@ -1060,16 +1764,9 @@ class RagEngine:
         if len(embs) < 2:
             return {"ok": False, "error": "库内向量不足，无法标定"}
 
-        # 按来源文档分组（同文档内 = 正例，跨文档 = 负例）
-        groups: Dict[str, List[int]] = {}
-        group_key: List[str] = []
-        for i, m in enumerate(metas):
-            m = m or {}
-            src = str(m.get("doc_id") or m.get("source_id") or m.get("source_file") or "?")
-            groups.setdefault(src, []).append(i)
-            group_key.append(src)
-
-        # 小节身份：取块首的【标题路径】前缀，供单文档降级取样用
+        # 小节身份：取块首的【标题路径】前缀。负例统一按「跨小节」判定，
+        # 不再分单文档/多文档——跨文档块对因标题前缀不同而天然虚低，
+        # 用它当噪音会低估天花板、把门槛标偏高（实测会误杀大量有效查询）。
         def _section_of(i: int) -> str:
             m = metas[i] if i < len(metas) and metas[i] else {}
             txt = str(docs_txt[i]) if i < len(docs_txt) and docs_txt[i] else ""
@@ -1078,80 +1775,100 @@ class RagEngine:
                 end = head.find("】")
                 if end > 0:
                     return head[1:end]
-            # 没有前缀时退到 chunk 序号段，至少能区分不同位置
+            # 没有标题前缀时退到「来源 + chunk 序号」，保证每个块各自成节
             return f"{m.get('source_id') or '?'}#chunk{m.get('chunk_index', i)}"
 
-        multi_doc = len(groups) >= 2
-        docs_with_multi = [idxs for idxs in groups.values() if len(idxs) >= 2]
-
-        if multi_doc:
-            sample_basis = "cross_document"
-        else:
-            # 单篇文档：改按小节分组
-            if not docs_with_multi:
-                return {"ok": False,
-                        "error": "库内只有单一文档且不足 2 块，无法构造正负例；"
-                                 "请入库更多文档后重试，或用 calibrate_scores 手工指定正负例"}
-            group_key = [_section_of(i) for i in range(len(embs))]
-            sample_basis = "cross_section"
-            # 重新按小节分组，正例要从「同小节」里取
-            sec_groups: Dict[str, List[int]] = {}
-            for i, k in enumerate(group_key):
-                sec_groups.setdefault(k, []).append(i)
-            docs_with_multi = [idxs for idxs in sec_groups.values() if len(idxs) >= 2]
-            if not docs_with_multi:
-                return {"ok": False,
-                        "error": "单篇文档内每个小节都只有 1 块，无法构造同组正例；"
-                                 "请入库更多文档，或用 calibrate_scores 手工指定正负例"}
-
-        rng = random.Random(20260101)  # 固定种子，标定结果可复现
-        pos: List[float] = []
-        neg: List[float] = []
-
-        # 正例：同组（多文档=同文档；单文档=同小节）内随机块对
-        attempts = 0
-        while len(pos) < sample_pairs and attempts < sample_pairs * 20:
-            attempts += 1
-            if not docs_with_multi:
-                break
-            idxs = rng.choice(docs_with_multi)
-            a, b = rng.sample(idxs, 2)
-            pos.append(_cosine(embs[a], embs[b]))
-
-        # 负例：跨组随机块对
-        all_idx = list(range(len(embs)))
-        attempts = 0
-        while len(neg) < sample_pairs and attempts < sample_pairs * 20:
-            attempts += 1
-            a, b = rng.sample(all_idx, 2)
-            if group_key[a] == group_key[b]:
-                continue  # 同组的留给正例，负例只要跨组的
-            neg.append(_cosine(embs[a], embs[b]))
-
-        if not pos or not neg:
+        group_key: List[str] = [_section_of(i) for i in range(len(embs))]
+        n_sections = len(set(group_key))
+        if n_sections < 2:
             return {"ok": False,
-                    "error": f"取样不足（正例 {len(pos)} / 负例 {len(neg)}）；"
-                             f"语料太少，请入库更多文档后重试"}
+                    "error": "库内只有一个语义小节，无法构造跨小节噪音样本；"
+                             "请入库内容更丰富的文档后重试"}
+
+        # ---------- 取样：走真实检索路径，而不是块-块余弦 ----------
+        # 为什么不用块-块相似度（旧实现的做法）：
+        #   门槛卡的是「查询 → 块」的相关度，而块-块相似度是另一个量纲，
+        #   两者分布不同、不可直接套用。更糟的是块内容里带【标题路径】前缀，
+        #   同文档块对天然共享产品名/文档名而相似度虚高，跨文档块对因标题不同而虚低，
+        #   于是算出的 margin 实际在测「是否同一篇文档」，与「查询是否相关」无关。
+        #   实测后果：据此标出 0.637 的门槛，把 9/25 条有效查询直接误杀（P@1 100%→64%）。
+        #
+        # 正确做法：拿块正文造「伪查询」，走真实 search() 通道打分——
+        #   正例 = 伪查询命中它自己那块时的分数（相关命中地板）
+        #   负例 = 同一伪查询在其他小节块上的最高分（噪音天花板）
+        #   两者都是 query→chunk，与门槛同量纲，可直接比较。
+        rng = random.Random(20260101)  # 固定种子，标定结果可复现
+
+        identities: List[Tuple[str, Any]] = []  # 每块的 (source_id, chunk_index) 身份
+        for i, m in enumerate(metas):
+            m = m or {}
+            identities.append((str(m.get("source_id") or ""), m.get("chunk_index")))
+
+        pos: List[float] = []   # 相关命中分数
+        neg: List[float] = []   # 跨小节噪音分数
+        cand_idx = list(range(len(embs)))
+        rng.shuffle(cand_idx)
+
+        for i in cand_idx:
+            if len(pos) >= sample_pairs:
+                break
+            body = _strip_title_prefix(str(docs_txt[i]) if i < len(docs_txt) else "")
+            pq = _make_pseudo_query(body)
+            if len(pq) < 8:
+                continue  # 伪查询太短（纯符号/表格残渣），无意义
+            try:
+                hits = self.search(pq, top_k=5, collection_name=name, min_score=0.0)
+            except Exception:
+                continue
+            if not hits:
+                continue
+
+            self_id = identities[i]
+            self_score = None
+            other_best = 0.0
+            for h in hits:
+                hm = h.get("metadata") or {}
+                hid = (str(hm.get("source_id") or ""), hm.get("chunk_index"))
+                if hid == self_id:
+                    self_score = float(h.get("relevance_score") or 0.0)
+                else:
+                    # 只统计「跨小节」的噪音；同小节其他块仍属相关内容，不算噪音
+                    j = next((k for k, v in enumerate(identities) if v == hid), None)
+                    if j is not None and group_key[j] != group_key[i]:
+                        other_best = max(other_best, float(h.get("relevance_score") or 0.0))
+            if self_score is not None:
+                pos.append(self_score)
+            if other_best > 0:
+                neg.append(other_best)
+
+        if len(pos) < 3 or len(neg) < 3:
+            return {"ok": False,
+                    "error": f"取样不足（相关 {len(pos)} / 噪音 {len(neg)}）；"
+                             f"语料太少或块内容过短，请入库更多文档后重试"}
 
         pos_sorted = sorted(pos)
         neg_sorted = sorted(neg)
-        # 门槛取正例 P10：容忍同文档 10% 的正常波动，同时尽量高于负例地板
+        # 相关命中地板（P10：容忍 10% 的正常波动，门槛必须低于它，否则会误杀有效结果）
         p10 = pos_sorted[max(0, int(len(pos_sorted) * 0.10) - 1)]
+        # 噪音天花板（P90：高于它的门槛能滤掉约 90% 噪音）
         neg_max = neg_sorted[-1]
         neg_p90 = neg_sorted[min(len(neg_sorted) - 1, int(len(neg_sorted) * 0.90))]
 
-        # 正例 P10 若低于负例 P90，说明两组重叠，取中点更稳
-        suggested = p10 if p10 > neg_p90 else round((p10 + neg_p90) / 2, 4)
-        suggested = round(min(max(suggested, 0.05), 0.90), 4)
-        margin = round(p10 - neg_max, 4)
+        # 门槛取「噪音天花板」与「相关地板」的中点：
+        # 既不会高于 p10 而误杀有效结果，又能尽量压住噪音。
+        # 偏向召回是刻意的取舍——漏掉噪音只是多读几段，误杀正确答案则是知识库静默失效。
+        margin = round(p10 - neg_p90, 4)
+        suggested = round((neg_p90 + p10) / 2, 4) if margin > 0 else round(p10 * 0.9, 4)
+        suggested = round(min(max(suggested, 0.05), p10), 4)
 
+        src_count = len({str((m or {}).get("source_id") or "?") for m in metas})
         result = {
             "ok": True,
             "embed_model": self.cfg.embed_model,
             "collection": name,
-            "sample_basis": sample_basis,
-            "samples": {"docs": len(groups), "chunks": len(embs),
-                        "groups": len(set(group_key)),
+            "sample_basis": "pseudo_query_via_search",
+            "samples": {"docs": src_count, "chunks": len(embs),
+                        "sections": n_sections,
                         "pos_pairs": len(pos), "neg_pairs": len(neg)},
             "pos_p10": round(p10, 4),
             "pos_min": round(pos_sorted[0], 4),
@@ -1161,39 +1878,31 @@ class RagEngine:
             "suggested_min_score": suggested,
             "separable": margin > 0,
             "verdict": (
-                "正负例可分离，门槛已按正例 P10 标定"
-                if margin > 0 else (
-                    # 单文档跨小节取样下 margin≤0 是预期结果，不代表模型有问题
-                    "单篇文档内各章节主题相近，跨小节块对无法充当有效负例，"
-                    "本次无法自动标定。请改用真实问句标定（calibrate_scores：文档内有答案的问题"
-                    "作正例、无关问题作负例），或入库更多不同主题的文档后重试。"
-                    if sample_basis == "cross_section" else
-                    "⚠️ 正负例分数重叠（margin≤0）：调门槛无法根治，"
-                    "需换 embedding 模型、增大 chunk_size 或检查文档是否主题过于集中"
-                )
+                "相关命中地板高于跨小节噪音天花板，门槛取两者中点，可分离"
+                if margin > 0 else
+                "⚠️ 相关命中与跨小节噪音分数重叠（margin≤0）：门槛已按「不高于相关地板」"
+                "保守取值，可避免误杀，但滤噪能力有限。建议检查文档主题是否过于集中、"
+                "或改用 calibrate_scores 以真实问句标定。"
             ),
         }
-        if sample_basis == "cross_section":
-            # 单文档降级取样的可信度低于跨文档取样，必须显式告知，不能让人误以为是同等标定
+        if margin <= 0:
             result["caveat"] = (
-                "库内只有 1 篇文档，负例改用「跨小节块对」近似。"
-                "同一篇报告的不同章节主题相近，噪音地板会被低估，标定门槛偏松；"
-                "入库更多文档后重跑 --kb-calibrate 可获得更可靠的门槛。"
+                "库内各小节主题相近，跨小节噪音与相关命中分数重叠，"
+                "本次门槛只能保证不误杀、无法保证滤噪；"
+                "入库主题更分散的文档后重跑 --kb-calibrate 可获得更可靠的门槛。"
             )
 
-        # 安全闸门：不可分离时**拒绝写入门槛**。
-        # margin≤0 意味着「同组块对」并不比「跨组块对」更相似，此时算出的门槛
-        # 往往高于真实问题的命中分数，写进去会让知识库静默返回 0 条（不报错、难排查）。
-        # 宁可保持原门槛不变，也不能标出一个让检索整体失效的值。
-        if persist and margin > 0:
+        # 安全闸门：门槛必须**不高于相关命中地板 p10**，否则会把有效结果一起滤掉。
+        # suggested 的计算式已用 min(..., p10) 保证这一点；这里再做一次显式钳制，
+        # 防止将来改动取样逻辑时丢掉该不变量——
+        # 历史上就因为标出高于相关分数的门槛，导致知识库静默返回 0 条（不报错、极难排查）。
+        suggested = round(min(suggested, p10), 4)
+        result["suggested_min_score"] = suggested
+        if persist:
             self.save_min_score(suggested, collection_name=name)
             result["persisted"] = True
-        elif persist:
+        else:
             result["persisted"] = False
-            result["not_persisted_reason"] = (
-                "正负例不可分离，已保留原有门槛不做修改"
-                f"（当前生效值 {self._min_score_for(name)}）"
-            )
         return result
 
 

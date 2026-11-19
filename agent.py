@@ -41,6 +41,10 @@ class AgentConfig:
     rag_min_score: Optional[float] = None
     rag_max_chars: int = 2400     # 注入内容总长度上限
     rag_collections: Optional[List[str]] = None  # 留空用引擎默认库
+    # 第五阶段：注入检索是否走混合检索（查询改写 + BM25 + RRF）。
+    # 任务目标常是口语表述，与文档术语有词汇鸿沟，混合检索能显著提升命中；
+    # 代价是每条查询多一次本地小模型改写（进程内缓存，同目标不重复调用）。
+    rag_hybrid: bool = True
     # ---------------- 经验召回注入（第四阶段）----------------
     use_experience: bool = True
     exp_top_k: int = 2
@@ -224,18 +228,35 @@ class Agent:
             return ""
         try:
             colls = cfg.rag_collections or []
+            k = max(1, int(cfg.rag_top_k))
+            # 任务目标通常是口语表述，与文档术语存在词汇鸿沟，混合检索命中率更高；
+            # 若引擎不支持（旧版本）或调用异常，回落到纯向量，保证注入永远可用。
+            hybrid = bool(getattr(cfg, "rag_hybrid", False))
+            search_hybrid = getattr(self.rag, "search_hybrid", None)
             if len(colls) > 1:
-                hits = self.rag.search_multi(goal, colls, top_k=cfg.rag_top_k,
-                                             min_score=cfg.rag_min_score)
+                hits = self.rag.search_multi(goal, colls, top_k=k,
+                                             min_score=cfg.rag_min_score,
+                                             hybrid=hybrid)
+            elif hybrid and callable(search_hybrid):
+                hits = search_hybrid(goal, top_k=k,
+                                     collection_name=(colls[0] if colls else None),
+                                     min_score=cfg.rag_min_score)
             else:
+                hits = self.rag.search(goal, top_k=k,
+                                       collection_name=(colls[0] if colls else None),
+                                       min_score=cfg.rag_min_score)
+        except Exception:
+            # 混合检索出问题时不要直接放弃注入，退回纯向量再试一次
+            try:
+                colls = cfg.rag_collections or []
                 hits = self.rag.search(
                     goal,
                     top_k=max(1, int(cfg.rag_top_k)),
                     collection_name=(colls[0] if colls else None),
                     min_score=cfg.rag_min_score,
                 )
-        except Exception:
-            return ""
+            except Exception:
+                return ""
         if not hits:
             return ""
         body = self.rag.format_context(hits, max_chars=cfg.rag_max_chars)

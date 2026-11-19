@@ -69,10 +69,12 @@ def register_rag_tools(
     experience: Any = None,
     default_collection: str = "agent_general_knowledge",
     experience_collection: str = "agent_experience",
+    hybrid: bool = True,
 ) -> List[str]:
     """把 RAG 相关工具挂进注册表，返回实际注册成功的工具名。
 
     engine 为 None 时注册「降级版」工具（返回不可用说明），保证模型看到的工具清单稳定。
+    hybrid: rag_search 是否走混合检索（查询改写 + BM25 + RRF）。False 时退回纯向量。
     """
     added: List[str] = []
 
@@ -96,13 +98,17 @@ def register_rag_tools(
         k = max(1, min(int(top_k), 8))
         coll = (collection or "").strip()
         try:
+            # 混合检索（查询改写 + BM25 + RRF）能跨过口语与文档术语的词汇鸿沟；
+            # 若上层关闭或改写器不可用，search_hybrid 内部会退回纯向量，不会报错。
             if coll.lower() == "all":
                 hits = engine.search_multi(
-                    q, [default_collection, experience_collection], top_k=k, min_score=None
+                    q, [default_collection, experience_collection], top_k=k,
+                    min_score=None, hybrid=hybrid,
                 )
             else:
-                hits = engine.search(
-                    q, top_k=k, collection_name=coll or default_collection, min_score=None
+                hits = engine.search_hybrid(
+                    q, top_k=k, collection_name=coll or default_collection,
+                    min_score=None, expand=hybrid, use_lexical=hybrid,
                 )
         except Exception as e:
             return _degraded(f"{type(e).__name__}: {e}")

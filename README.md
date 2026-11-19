@@ -394,7 +394,8 @@ python -m main --show-trace 20261109-165437-2dce
 
 ```bash
 ollama pull qwen2.5:7b-instruct
-.venv/Scripts/python.exe -m main --serve -m hybrid --local-model qwen2.5:7b-instruct
+
+
 # 等价环境变量：OLLAMA_MODEL=qwen2.5:7b-instruct  OLLAMA_URL=http://127.0.0.1:11434
 ```
 
@@ -530,3 +531,13 @@ curl -X POST http://127.0.0.1:8787/api/scope -d '{"enabled": true}'
 1. **浏览器工具异步化**：把 `xhs_*` 从同步 Playwright + 线程池迁到 async，取消用 `task.cancel()`，长任务中途停止不留孤儿进程。
 2. **多工作区**：策略表 / 记忆 / 快照按工作区分区，设置页支持切换目标工作区。
 3. **视觉闭环**：接一个多模态模型，把 `sys_screenshot` 的图喂回去，就能做「看界面 → 点按钮 → 校验结果」的真正 GUI 自动化；现在只差这一步。
+
+
+# 单次任务
+.venv/Scripts/python.exe -m main --full-computer -p "打开计算器算 123*456，结果记到 result.txt"
+
+# 控制台常开
+.venv/Scripts/python.exe -m main --serve --full-computer
+
+# 运行中切换：设置页「电脑操控 → 放开到整台电脑」，或 POST /api/scope {"enabled":true}
+

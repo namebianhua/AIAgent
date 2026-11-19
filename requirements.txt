@@ -14,7 +14,7 @@ playwright==1.58.0
 # 定时任务用标准库 threading + json。这部分刻意零重依赖，
 # 避免国内网络环境装不上依赖导致整套功能不可用。
 
-# 知识库 RAG（第一~四阶段，本轮新增）：以下为「可选依赖」。
+# 知识库 RAG（第一~五阶段）：以下为「可选依赖」。
 #   pip install chromadb          # 本地向量库（必需，缺了知识库自动降级为不启用）
 #   pip install pypdf             # 解析 PDF 才需要
 #   pip install python-docx       # 解析 .docx 才需要
@@ -23,14 +23,33 @@ playwright==1.58.0
 # 为什么是 bge-m3 而不是 nomic-embed-text：后者是英文主导模型，中文语义几乎不区分。
 #   实测同一组中文对照（相关 vs 不相关）：nomic 间距 -0.020（倒挂，噪音分数高于正确答案），
 #   bge-m3 间距 +0.191（可区分）。中文知识库必须用中文/多语言 embedding 模型。
+#
+# 第五阶段的查询改写复用已有的本地对话模型（qwen2.5:7b-instruct），不新增依赖；
+#   该模型缺失时改写通道自动关闭，混合检索退回「向量 + BM25」，仍优于纯向量。
+#
 # 设计原则：chromadb / Ollama 任一不可用时，Agent 照常工作（只是不带知识库），
 #   绝不因 RAG 依赖缺失而启动失败。详见 rag_engine.py / experience.py 的降级逻辑。
+#
 # 常用命令：
 #   python main.py --kb-add docs/            # 把目录入库
 #   python main.py --kb-search "部署规范"     # 语义检索
 #   python main.py --kb-status               # 知识库状态与探活
+#   python main.py --kb-list                 # 列出已入库文档
+#   python main.py --kb-calibrate-dry-run    # 试算相关度门槛（先看不写入，推荐）
+#   python main.py --kb-calibrate            # 标定门槛并写入该库（换 embedding 模型后必须重跑）
 #   python main.py --exp-query "统计代码行数" # 检索历史任务经验
-#   python test_rag.py                       # 四阶段端到端自检
+#   python main.py --no-rag-hybrid           # 关闭混合检索，退回纯向量（对比用）
+#   python test_rag.py                       # 五阶段端到端自检（40 项断言，失败时退出码非 0）
+#   python rag_eval.py                       # 检索质量评测（常规集 + 严格集）
+#   python rag_eval.py --compare             # 逐条对比纯向量 vs 混合检索的修复/退化
+#   python rag_eval.py --strict-only --hybrid --fail-under 0.75   # 回归门禁
+#
+# 关于门槛标定（重要，踩过的坑）：
+#   余弦分数的绝对值不可跨模型/跨语料比较，min_score 必须按库标定，不能写死。
+#   库内只有 1 篇文档时 auto_calibrate 无法构造有效负例，会**拒绝写入**并提示；
+#   此时请用 calibrate_scores(positives, negatives) 以真实问句标定
+#   （正例 = 文档内有答案的问题，负例 = 文档内绝无答案的问题）。
+#   标定的安全不变量：门槛必须 ≤ 相关命中地板，否则知识库会静默返回 0 条。
 
 
 # 交互层（控制台）：仍然零新增依赖。

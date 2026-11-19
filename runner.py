@@ -106,6 +106,10 @@ class RunOptions:
     # None = 沿用各知识库标定出的门槛（推荐）。余弦分数不可跨模型比较，
     # 写死会在换 embedding 模型后失效，故默认交给库内标定值。
     rag_min_score: Optional[float] = None
+    # 第五阶段：混合检索（查询改写 + BM25 + RRF），解决口语查询与文档术语的词汇鸿沟。
+    # 代价：每条查询多一次本地小模型改写（约 0.5~2s，有进程内缓存）。
+    rag_hybrid: bool = True
+    rag_expander_model: str = ""    # 留空用 qwen2.5:7b-instruct 或环境变量 RAG_EXPANDER_MODEL
     # 第四阶段：经验库
     use_experience: bool = True     # 任务结束后把轨迹向量化沉淀，开始时语义召回
     exp_collection: str = "agent_experience"
@@ -205,6 +209,34 @@ def build_rag(opts: RunOptions) -> Dict[str, Any]:
         )
         engine.default_collection = opts.rag_collection or engine.default_collection
         out["engine"] = engine
+
+        # 第五阶段：混合检索的查询改写器。
+        # 注意 engine 来自 get_engine() 的**进程内单例**，属性会跨调用残留：
+        # 若只在 rag_hybrid=True 时赋值，那么常驻进程里用户关掉混合检索后，
+        # 上一次挂上的改写器仍在，配置切换失效。所以这里必须**显式双向赋值**。
+        # 改写模型不可用时 expander 为 None，search_hybrid 会自动退回
+        # 「只用原查询」的向量+BM25 组合，不报错。
+        engine.expander = None
+        if opts.rag_hybrid:
+            try:
+                from query_expander import ExpanderConfig, QueryExpander
+
+                expander = QueryExpander(ExpanderConfig(
+                    model=opts.rag_expander_model
+                    or os.getenv("RAG_EXPANDER_MODEL", "qwen2.5:7b-instruct"),
+                    base_url=(opts.rag_ollama_url or opts.ollama_base
+                              or os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")),
+                ))
+                probe = expander.probe()
+                if probe.get("ok"):
+                    engine.expander = expander  # search_hybrid 会优先用它
+                    out["expander"] = expander
+                else:
+                    out["expander_note"] = f"查询改写不可用，混合检索退回向量+BM25：{probe.get('reason')}"
+            except Exception as e:
+                out["expander_note"] = f"改写器初始化失败（不影响检索）：{type(e).__name__}: {e}"
+        # 短路/候选池等混合检索参数同样要按当前配置刷新，避免单例沿用旧值
+        engine.cfg.hybrid_shortcut = bool(opts.rag_hybrid)
     except ImportError as e:
         out["error"] = f"chromadb 未安装（pip install chromadb）：{e}"
         return out
@@ -376,6 +408,7 @@ def execute(
                         rag_engine.default_collection if rag_engine else opts.rag_collection
                     ),
                     experience_collection=opts.exp_collection or "agent_experience",
+                    hybrid=opts.rag_hybrid,
                 )
                 on_event({"event": "rag_tools", "tools": added})
             except Exception as e:
@@ -484,6 +517,7 @@ def execute(
             rag_top_k=opts.rag_top_k,
             rag_min_score=opts.rag_min_score,
             rag_collections=[opts.rag_collection] if opts.rag_collection else None,
+            rag_hybrid=bool(opts.rag_hybrid and rag_engine is not None),
             # 第四阶段：语义经验召回注入
             use_experience=bool(experience is not None),
             exp_top_k=opts.exp_top_k,
